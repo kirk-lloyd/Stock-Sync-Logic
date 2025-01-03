@@ -3,7 +3,7 @@ import pkg from 'pg';
 const { Pool } = pkg;
 import dotenv from 'dotenv';
 
-dotenv.config({ path: '/home/ec2-user/stock-sync-logic/backend/.env' }); // Adjust the path as needed
+dotenv.config({ path: '/home/ec2-user/Stock-Sync-Logic/backend/.env' }); // Adjust the path as needed
 
 const pool = new Pool({
   host: process.env.DB_HOST,
