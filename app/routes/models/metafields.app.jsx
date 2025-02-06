@@ -50,6 +50,24 @@ export const action = async ({ request }) => {
       type: "boolean",
       ownerType: "PRODUCTVARIANT",
     },
+    {
+      namespace: "projektstocksyncparentmaster",
+      key: "parentmaster",
+      name: "Projekt Sync - Parent Master",
+      description:
+        "This metafield is used to identify which product is the child master. The parent master is the product that is the stock master for the child products",
+      type: "list.variant_reference",
+      ownerType: "PRODUCTVARIANT",
+    },
+    {
+      namespace: "projektstocksyncqtymanagement",
+      key: "qtymanagement",
+      name: "Projekt Sync - Child Qty Management",
+      description:
+        "This metafield is used to control how many quantities are synced between the master",
+      type: "number_integer",
+      ownerType: "PRODUCTVARIANT",
+    },
   ];
 
   for (const metafield of requiredMetafields) {
