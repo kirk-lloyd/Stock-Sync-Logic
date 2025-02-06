@@ -86,6 +86,19 @@ async function activateInventoryItem(adminHeaders, inventoryItemId, locationId) 
 // 3) Mutation to update inventory using inventorySetQuantities
 // ------------------------------------------------------------------
 async function setInventoryQuantity(adminHeaders, inventoryItemId, locationId, quantity) {
+  // Ensure inventoryItemId is properly formatted
+  let cleanInventoryItemId;
+
+  if (typeof inventoryItemId === "string") {
+    cleanInventoryItemId = inventoryItemId.startsWith("gid://shopify/InventoryItem/")
+      ? inventoryItemId // If it's already formatted, use as is
+      : `gid://shopify/InventoryItem/${inventoryItemId}`; // Otherwise, format it correctly
+  } else {
+    cleanInventoryItemId = `gid://shopify/InventoryItem/${inventoryItemId}`;
+  }
+
+  console.log(`🛠 Updating inventory for: ${cleanInventoryItemId} at location: ${locationId} with quantity: ${quantity}`);
+
   const response = await fetch(
     "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
     {
@@ -110,13 +123,13 @@ async function setInventoryQuantity(adminHeaders, inventoryItemId, locationId, q
         `,
         variables: {
           input: {
-            name: "on_hand", // Correct inventory state
-            reason: "correction", // Valid reason
+            name: "on_hand",
+            reason: "correction",
             ignoreCompareQuantity: true,
-            referenceDocumentUri: "gid://shopify/Order/123456789", // Optional but recommended
+            referenceDocumentUri: "gid://shopify/Order/123456789",
             quantities: [
               {
-                inventoryItemId: `gid://shopify/InventoryItem/${inventoryItemId}`,
+                inventoryItemId: cleanInventoryItemId,
                 locationId: `gid://shopify/Location/${locationId}`,
                 quantity,
               },
@@ -128,8 +141,17 @@ async function setInventoryQuantity(adminHeaders, inventoryItemId, locationId, q
   );
 
   const data = await response.json();
+
+  if (data.errors) {
+    console.error(`❌ Error updating inventory for ${cleanInventoryItemId}:`, JSON.stringify(data.errors, null, 2));
+  } else {
+    console.log(`✅ Successfully updated inventory for ${cleanInventoryItemId}`);
+  }
+
   return data;
 }
+
+
 
 // ------------------------------------------------------------------
 // 4) Functions to determine if an item is a master or child
@@ -355,6 +377,7 @@ async function getMasterChildInfo(adminHeaders, inventoryItemId) {
 async function getChildrenInventoryItems(adminHeaders, masterVariantId) {
   console.log(`🔍 Fetching children for masterVariantId: ${masterVariantId}`);
 
+  // 1️⃣ Consulta para obtener los children desde metafield y variantes del mismo producto
   const query = `
   query GetProductVariant($variantId: ID!) {
     productVariant(id: $variantId) {
@@ -396,24 +419,24 @@ async function getChildrenInventoryItems(adminHeaders, masterVariantId) {
   const data = await response.json();
   console.log("📩 Full response from Shopify:", JSON.stringify(data, null, 2));
 
-  // Verify if there were any errors in Shopify's response
   if (data.errors) {
     console.error("❌ Shopify GraphQL Error:", JSON.stringify(data.errors, null, 2));
     return [];
   }
 
-  // Retrieve variant information
-  const variant = data?.data?.node;
+  const variant = data?.data?.productVariant;
   if (!variant) {
     console.error(`❌ Variant not found for masterVariantId: ${masterVariantId}`);
     return [];
   }
 
-  // Parse the "childrenkey" metafield if it exists
+  // 2️⃣ Extraer y limpiar los IDs de las variantes hijas
   let childVariantIds = [];
   try {
     if (variant.metafield?.value) {
-      childVariantIds = JSON.parse(variant.metafield.value);
+      childVariantIds = JSON.parse(variant.metafield.value).map((id) =>
+        id.replace("gid://shopify/ProductVariant/", "")
+      );
     }
   } catch (err) {
     console.error("❌ Error parsing 'childrenkey' from master variant:", err);
@@ -425,19 +448,79 @@ async function getChildrenInventoryItems(adminHeaders, masterVariantId) {
     return [];
   }
 
-  console.log(`📌 Children IDs from metafield: ${JSON.stringify(childVariantIds)}`);
+  console.log(`📌 Children IDs from metafield (cleaned): ${JSON.stringify(childVariantIds)}`);
 
-  // Convert variant IDs into InventoryItem IDs
+  // 3️⃣ Intentar obtener los InventoryItem ID de las variantes del mismo producto
   const allVariantEdges = variant.product?.variants?.edges || [];
-  const childInventoryItemIds = childVariantIds.map((childVarId) => {
-    const childEdge = allVariantEdges.find((edge) => edge.node.id === childVarId);
-    return childEdge?.node?.inventoryItem?.id;
-  }).filter(Boolean); // Filter out null or undefined values
+  let childInventoryItemIds = childVariantIds.map((childVarId) => {
+    const childEdge = allVariantEdges.find((edge) =>
+      edge.node.id.replace("gid://shopify/ProductVariant/", "") === childVarId
+    );
+
+    if (!childEdge) {
+      console.warn(`⚠️ No matching inventory item found for child variant in product query: ${childVarId}`);
+      return null;
+    }
+    return childEdge.node.inventoryItem?.id || null;
+  }).filter(Boolean); // Remove null values
+
+  // 4️⃣ Si no encontramos todos los `inventoryItemId`, hacer una consulta individual por cada uno
+  const missingVariants = childVariantIds.filter(
+    (childVarId) => !childInventoryItemIds.includes(childVarId)
+  );
+
+  if (missingVariants.length > 0) {
+    console.log(`🔍 Fetching missing variants individually: ${JSON.stringify(missingVariants)}`);
+
+    const variantQuery = `
+    query GetVariants($variantIds: [ID!]!) {
+      nodes(ids: $variantIds) {
+        ... on ProductVariant {
+          id
+          inventoryItem {
+            id
+          }
+        }
+      }
+    }`;
+
+    const missingResponse = await fetch(
+      "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...adminHeaders,
+        },
+        body: JSON.stringify({
+          query: variantQuery,
+          variables: { variantIds: missingVariants.map(id => `gid://shopify/ProductVariant/${id}`) },
+        }),
+      }
+    );
+
+    const missingData = await missingResponse.json();
+    console.log("📩 Missing Variants Response from Shopify:", JSON.stringify(missingData, null, 2));
+
+    if (!missingData.errors) {
+      missingData.data.nodes.forEach((node) => {
+        if (node?.inventoryItem?.id) {
+          childInventoryItemIds.push(node.inventoryItem.id);
+        } else {
+          console.warn(`⚠️ Variant ${node?.id} has no inventoryItem.`);
+        }
+      });
+    } else {
+      console.error("❌ Error fetching missing variants:", JSON.stringify(missingData.errors, null, 2));
+    }
+  }
 
   console.log(`✅ Final list of child InventoryItem IDs: ${JSON.stringify(childInventoryItemIds)}`);
 
   return childInventoryItemIds;
 }
+
+
 
 
 // ------------------------------------------------------------------
@@ -581,62 +664,93 @@ export const action = async ({ request }) => {
 
     if (info.isChild) {
       // => Item is a CHILD. Update its MASTER and then all children
-      console.log(`Item ${inventoryItemId} is a CHILD => Master = ${info.masterInventoryItemId}`);
-
+      console.log(`🔄 Item ${inventoryItemId} is a CHILD. Syncing with MASTER ${info.masterInventoryItemId}`);
+    
       if (!info.masterInventoryItemId) {
-        console.log("Master inventoryItemId not found => skipping update");
+        console.warn("⚠️ Master inventoryItemId not found. Skipping update.");
         return json({ message: "Child updated, but no master ID found." });
       }
-
-      // 7.1. Update the master
-      console.log(`Updating MASTER ${info.masterInventoryItemId} => quantity ${newQuantity}`);
-      const masterUpdate = await setInventoryQuantity(
-        admin.headers,
-        info.masterInventoryItemId,
-        locationId,
-        newQuantity
-      );
-      console.log("Master update =>", JSON.stringify(masterUpdate, null, 2));
-
-      // 7.2. Retrieve master's children => update them
-      console.log("Fetching siblings from master's 'childrenkey'...");
-      const siblings = await getChildrenInventoryItems(admin.headers, info.masterVariantId);
-      console.log("Siblings found =>", siblings);
-
-      for (const childInventoryId of siblings) {
-        // Avoid re-updating the child that triggered the webhook
-        if (Number(childInventoryId) === Number(inventoryItemId)) {
-          console.log("Skipping the same child =>", childInventoryId);
-          continue;
-        }
-        console.log(`Updating sibling ${childInventoryId} => ${newQuantity}`);
-        const siblingUpdate = await setInventoryQuantity(
+    
+      // 1️⃣ Update the MASTER with the new quantity
+      console.log(`🔄 Updating MASTER ${info.masterInventoryItemId} with quantity ${newQuantity}`);
+      try {
+        const masterUpdate = await setInventoryQuantity(
           admin.headers,
-          childInventoryId,
+          info.masterInventoryItemId,
           locationId,
           newQuantity
         );
-        console.log("Sibling update =>", JSON.stringify(siblingUpdate, null, 2));
+        console.log("✅ Master update response:", JSON.stringify(masterUpdate, null, 2));
+      } catch (err) {
+        console.error("❌ Error updating MASTER inventory:", err);
+        return json({ error: "Failed to update master inventory" }, { status: 500 });
+      }
+    
+      // 2️⃣ Retrieve MASTER's children and update them
+      console.log("🔍 Fetching children (siblings) from MASTER...");
+      let siblings = [];
+      try {
+        siblings = await getChildrenInventoryItems(admin.headers, info.masterVariantId);
+        console.log("📌 Siblings found:", siblings);
+      } catch (err) {
+        console.error("❌ Error fetching siblings:", err);
+        return json({ error: "Failed to retrieve sibling inventory" }, { status: 500 });
+      }
+    
+      for (const childInventoryId of siblings) {
+        if (Number(childInventoryId) === Number(inventoryItemId)) {
+          console.log("⏭️ Skipping update for the same child:", childInventoryId);
+          continue;
+        }
+    
+        console.log(`🔄 Updating sibling ${childInventoryId} with quantity ${newQuantity}`);
+        try {
+          const siblingUpdate = await setInventoryQuantity(
+            admin.headers,
+            childInventoryId,
+            locationId,
+            newQuantity
+          );
+          console.log("✅ Sibling update response:", JSON.stringify(siblingUpdate, null, 2));
+        } catch (err) {
+          console.error(`❌ Error updating sibling ${childInventoryId}:`, err);
+        }
       }
     } else if (info.isMaster) {
       // => Item is a MASTER. Update all its children
-      console.log(`Item ${inventoryItemId} is a MASTER => updating children...`);
-
-      // 7.3. Retrieve its childrenkey => update all
-      const childInvIds = await getChildrenInventoryItems(admin.headers, info.variantId);
-      console.log("Children =>", childInvIds);
-
+      console.log(`🔄 Item ${inventoryItemId} is a MASTER. Syncing all children...`);
+    
+      if (!info.variantId) {
+        console.warn("⚠️ Master Variant ID not found. Skipping child updates.");
+        return json({ message: "Master update skipped due to missing variant ID." });
+      }
+    
+      // Retrieve MASTER's children and update them
+      let childInvIds = [];
+      try {
+        childInvIds = await getChildrenInventoryItems(admin.headers, info.variantId);
+        console.log("📌 Children to update:", childInvIds);
+      } catch (err) {
+        console.error("❌ Error fetching children:", err);
+        return json({ error: "Failed to retrieve children inventory" }, { status: 500 });
+      }
+    
       for (const childId of childInvIds) {
-        console.log(`Updating child ${childId} => ${newQuantity}`);
-        const update = await setInventoryQuantity(
-          admin.headers,
-          childId,
-          locationId,
-          newQuantity
-        );
-        console.log("Child update =>", JSON.stringify(update, null, 2));
+        console.log(`🔄 Updating child ${childId} with quantity ${newQuantity}`);
+        try {
+          const update = await setInventoryQuantity(
+            admin.headers,
+            childId,
+            locationId,
+            newQuantity
+          );
+          console.log("✅ Child update response:", JSON.stringify(update, null, 2));
+        } catch (err) {
+          console.error(`❌ Error updating child ${childId}:`, err);
+        }
       }
     }
+    
 
     return json({ message: "Inventory updated (master-child sync complete)." });
   } catch (err) {
