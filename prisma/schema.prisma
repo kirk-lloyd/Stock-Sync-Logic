@@ -37,3 +37,12 @@ model Stockdb {
   productHandle    String
   productVariantId String
 }
+
+model WebhookEvent {
+  id              String   @id @default(uuid())
+  inventoryItemId String
+  newQuantity     Int
+  processedAt     DateTime @default(now())
+
+  @@index([inventoryItemId])
+}
