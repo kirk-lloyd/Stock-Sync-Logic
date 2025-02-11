@@ -52,13 +52,13 @@ function buildExactDedupKey(payload) {
 
 /*
 // ------------------------------------------------------------------
-// 0.1) 20-SECOND LOCK FOR (INVENTORY_ITEM + LOCATION)
+// 0.1) 6-SECOND LOCK FOR (INVENTORY_ITEM + LOCATION)
 // ------------------------------------------------------------------
 */
 const recentlyTouched = new Map();
 
 /**
- * Locks a `(inventoryItemId + locationId)` combo for 20 seconds
+ * Locks a `(inventoryItemId + locationId)` combo for 6 seconds
  * to avoid repeated re-processing of the same item+location in that window.
  *
  * @param {string} key
@@ -67,11 +67,11 @@ function markComboKey(key) {
   recentlyTouched.set(key, Date.now());
   setTimeout(() => {
     recentlyTouched.delete(key);
-  }, 20000);
+  }, 6000);
 }
 
 /**
- * Checks if `(inventoryItemId + locationId)` is locked from the last 20 seconds.
+ * Checks if `(inventoryItemId + locationId)` is locked from the last 6 seconds.
  *
  * @param {string} key
  * @returns {boolean}
@@ -184,8 +184,8 @@ async function setInventoryQuantity(adminHeaders, inventoryItemId, locationId, q
   }
 
   const referenceDocumentUriValue = internal
-    ? "https://example.com/by_app/internal-update"
-    : "https://example.com/external-update";
+    ? "https://e01c-144-6-61-19.ngrok-free.app/by_app/internal-update"
+    : "https://e01c-144-6-61-19.ngrok-free.app/external-update";
 
   const actionId = `${cleanInventoryItemId}-${locationId}`;
   console.log(
@@ -779,7 +779,7 @@ export const action = async ({ request }) => {
   const shortComboKey = `${payload.inventory_item_id}-${payload.location_id}`;
   if (hasComboKey(shortComboKey)) {
     console.log(`Skipping => combo locked => ${shortComboKey}`);
-    return new Response("Skipped => 20s combo lock", { status: 200 });
+    return new Response("Skipped => 6s combo lock", { status: 200 });
   }
   markComboKey(shortComboKey);
 
