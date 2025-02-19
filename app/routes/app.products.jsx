@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect } from "react";
 import {
+  Box,
   Card,
-  Layout,
   Page,
   IndexTable,
   Thumbnail,
@@ -16,54 +16,102 @@ import {
   ResourceItem,
   Frame,
   Toast,
+  Text,
+  Pagination,
 } from "@shopify/polaris";
 import { useLoaderData, useRevalidator } from "@remix-run/react";
 import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 
 /**
- * Helper function that extracts the numeric part of a Shopify GID.
- * Example: "gid://shopify/ProductVariant/12345" => "12345"
+ * parseVariantId:
+ * Extracts the numeric part from a Shopify GID string.
+ * For example, "gid://shopify/ProductVariant/12345" returns "12345".
  */
 function parseVariantId(gid = "") {
   return gid.split("/").pop();
 }
 
 /**
- * LOADER FUNCTION (Remix)
- *
- * Fetches all products, variants, and relevant metafields.
- * Then it populates child variant data by performing a second query.
- * Finally, returns a structured JSON object to the client.
+ * Loader function:
+ * This loader function authenticates with Shopify and retrieves products along with
+ * their variants and associated metafields. It identifies master variants and collects
+ * child variant IDs, subsequently querying for additional details of the child variants,
+ * including the quantity management metafield.
  */
 export const loader = async ({ request }) => {
-  console.log(
-    "Loader start: Attempting to authenticate, then fetch all products (variant-level metafields)."
-  );
+  console.log("Loader start: Authenticating and retrieving products…");
   const { admin } = await authenticate.admin(request);
 
   try {
-    console.log(
-      "Loader: Auth successful. Performing GraphQL query for products and variant-level metafields..."
-    );
-
-    // 1. Fetch products + variants
+    console.log("Authentication successful. Querying product data…");
     const response = await admin.graphql(
-      `#graphql\n      query GetAllProducts {\n        products(first: 100) {\n          edges {\n            node {\n              id\n              title\n              createdAt\n              images(first: 1) {\n                edges {\n                  node {\n                    originalSrc\n                  }\n                }\n              }\n              metafields(first: 30) {\n                edges {\n                  node {\n                    namespace\n                    key\n                    value\n                  }\n                }\n              }\n              variants(first: 50) {\n                edges {\n                  node {\n                    id\n                    title\n                    inventoryQuantity\n                    image {\n                      id\n                      originalSrc\n                    }\n                    masterMetafield: metafield(\n                      namespace: \"projektstocksyncmaster\"\n                      key: \"master\"\n                    ) {\n                      id\n                      value\n                    }\n                    childrenMetafield: metafield(\n                      namespace: \"projektstocksyncchildren\"\n                      key: \"childrenkey\"\n                    ) {\n                      id\n                      value\n                    }\n                  }\n                }\n              }\n            }\n          }\n        }\n      }`
+      `#graphql
+      query GetAllProducts {
+        products(first: 100) {
+          edges {
+            node {
+              id
+              title
+              createdAt
+              images(first: 1) {
+                edges {
+                  node {
+                    originalSrc
+                  }
+                }
+              }
+              metafields(first: 30) {
+                edges {
+                  node {
+                    namespace
+                    key
+                    value
+                  }
+                }
+              }
+              variants(first: 50) {
+                edges {
+                  node {
+                    id
+                    title
+                    inventoryQuantity
+                    image {
+                      id
+                      originalSrc
+                    }
+                    masterMetafield: metafield(
+                      namespace: "projektstocksyncmaster"
+                      key: "master"
+                    ) {
+                      id
+                      value
+                    }
+                    childrenMetafield: metafield(
+                      namespace: "projektstocksyncchildren"
+                      key: "childrenkey"
+                    ) {
+                      id
+                      value
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`
     );
-
     const data = await response.json();
     const rawProducts =
       data?.data?.products?.edges?.map((edge) => edge.node) || [];
 
-    // 2. Identify masters & gather child variant IDs
+    // Identify master variants and collect child variant IDs.
     let allChildVariantIds = [];
-
     const productsParsed = rawProducts.map((product) => {
       const updatedVariants = product.variants.edges.map((vEdge) => {
         const variant = vEdge.node;
         const isMaster = variant.masterMetafield?.value === "true";
-
         let childVariantIds = [];
         if (isMaster && variant.childrenMetafield?.value) {
           try {
@@ -75,65 +123,71 @@ export const loader = async ({ request }) => {
             console.error("Error parsing children for variant", variant.id, error);
           }
         }
-
         allChildVariantIds.push(...childVariantIds);
-
-        return {
-          ...variant,
-          isMaster,
-          childVariantIds,
-        };
+        return { ...variant, isMaster, childVariantIds };
       });
-
       return {
         ...product,
-        variants: {
-          edges: updatedVariants.map((v) => ({ node: v })),
-        },
+        variants: { edges: updatedVariants.map((v) => ({ node: v })) },
       };
     });
 
-    // 3. Remove duplicates, fetch child variants in a second query
+    // Fetch additional data for child variants (including quantity management metafield).
     const uniqueChildIds = [...new Set(allChildVariantIds)];
     let childVariantMap = {};
-
     if (uniqueChildIds.length > 0) {
       const childResponse = await admin.graphql(
-        `#graphql\n        query GetChildVariants($ids: [ID!]!) {\n          nodes(ids: $ids) {\n            ... on ProductVariant {\n              id\n              inventoryQuantity\n              title\n              image {\n                id\n                originalSrc\n              }\n              product {\n                id\n                title\n                images(first: 1) {\n                  edges {\n                    node {\n                      originalSrc\n                    }\n                  }\n                }\n              }\n            }\n          }\n        }`,
+        `#graphql
+        query GetChildVariants($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on ProductVariant {
+              id
+              inventoryQuantity
+              title
+              image {
+                id
+                originalSrc
+              }
+              product {
+                id
+                title
+                images(first: 1) {
+                  edges {
+                    node {
+                      originalSrc
+                    }
+                  }
+                }
+              }
+              qtyManagementMetafield: metafield(
+                namespace: "projektstocksyncqtymanagement"
+                key: "qtymanagement"
+              ) {
+                id
+                value
+              }
+            }
+          }
+        }`,
         { variables: { ids: uniqueChildIds } }
       );
-
       const childData = await childResponse.json();
       const childNodes = childData?.data?.nodes || [];
       childNodes.forEach((childVariant) => {
-        if (childVariant?.id) {
-          childVariantMap[childVariant.id] = childVariant;
-        }
+        if (childVariant?.id) childVariantMap[childVariant.id] = childVariant;
       });
     }
 
-    // 4. Attach child variant data to each master
+    // Attach fetched child variant data to each master variant.
     const finalProducts = productsParsed.map((product) => {
       const newEdges = product.variants.edges.map((edge) => {
         const variant = edge.node;
         const resolvedChildren = variant.childVariantIds
           .map((id) => childVariantMap[id])
           .filter(Boolean);
-
-        return {
-          node: {
-            ...variant,
-            childVariants: resolvedChildren,
-          },
-        };
+        return { node: { ...variant, childVariants: resolvedChildren } };
       });
-
-      return {
-        ...product,
-        variants: {
-          edges: newEdges,
-        },
-      };
+      return { ...product, variants: { edges: newEdges } };
     });
 
     return json({ products: finalProducts });
@@ -144,94 +198,61 @@ export const loader = async ({ request }) => {
 };
 
 /**
- * MAIN COMPONENT - ProductsTable
+ * ProductsTable Component:
+ * Renders a table of products and their variants with search, sorting, pagination,
+ * and disables checkboxes for variants that are already assigned as master or children in other products.
  *
- * Renders a table of Products -> Variants -> Child Variants.
- * Provides controls for:
- * - Marking a variant as Master.
- * - Managing children (linking them to a master variant).
- * - Editing inventory.
+ * Visual identification enhancements:
+ * - Each variant row is assigned a distinct background colour based on its status:
+ *   • Master variants receive a light green background.
+ *   • Child variants receive a pale orange background.
+ *   • Unassigned variants have a white background.
+ * - An additional "Status" column is provided which displays a corresponding tag indicating the variant's state.
  *
- * IMPORTANT ADDITION:
- * We enforce these rules:
- * 1) If a variant is a child of any master, it CANNOT become a master.
- * 2) If a variant is a master, it CANNOT become a child.
- * 3) A variant can only be a child of one master at a time.
- * 4) If a user tries to make an invalid configuration, display a notification.
+ * Other functionalities:
+ * - A search bar filters products by title.
+ * - Sorting is enabled on the "Details" column header (by product title).
+ * - Pagination is applied at the product level (10 items per page).
+ * - Clicking a product row expands the variants.
+ * - Master variant rows display actions to manage children and edit inventory.
  */
 export default function ProductsTable() {
+  if (typeof window === "undefined") return null;
+
   const { products: initialProducts } = useLoaderData();
   const revalidator = useRevalidator();
 
-  // Local state for all products
+  // Primary state for products.
   const [products, setProducts] = useState(initialProducts);
+  useEffect(() => setProducts(initialProducts), [initialProducts]);
 
-  // Keep products in sync with loader whenever it changes
-  useEffect(() => {
-    setProducts(initialProducts);
-  }, [initialProducts]);
+  // State for search, sorting, and pagination on products.
+  const [query, setQuery] = useState("");
+  const [sortValue, setSortValue] = useState("title");
+  const [sortDirection, setSortDirection] = useState("ascending");
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
 
+  // State for expanded rows.
   const [expandedProductIndex, setExpandedProductIndex] = useState(-1);
-
-  // Inventory modal
+  const [expandedMasters, setExpandedMasters] = useState([]);
   const [modalActive, setModalActive] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [selectedVariant, setSelectedVariant] = useState(null);
-
-  // Children management modal
   const [childrenModalActive, setChildrenModalActive] = useState(false);
-
-  // For editing inventory in a modal
   const [inventory, setInventory] = useState({});
-
-  // Keep a flattened list of all variants for selection as children
   const [allVariants, setAllVariants] = useState([]);
   const [childrenSelection, setChildrenSelection] = useState([]);
-
-  // Toast (for error notifications)
   const [toastActive, setToastActive] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
+  const [qtyManagementValues, setQtyManagementValues] = useState({});
 
-  /**
-   * showToast:
-   * Helper function to display an error or info message using a Polaris Toast.
-   */
-  function showToast(message) {
-    setToastMessage(message);
-    setToastActive(true);
-  }
+  // New state for the children management modal search and pagination.
+  const [childrenQuery, setChildrenQuery] = useState("");
+  const [childrenCurrentPage, setChildrenCurrentPage] = useState(1);
+  const childrenItemsPerPage = 5;
 
-  /**
-   * onDismissToast:
-   * Dismiss the Toast.
-   */
-  function onDismissToast() {
-    setToastActive(false);
-    setToastMessage("");
-  }
-
-  // Helper: Check if a variant is child of a different master.
-  function findMasterOfVariant(variantId) {
-    // We'll search across all products and their variants.
-    for (const prod of products) {
-      for (const ve of prod.variants.edges) {
-        const possibleMaster = ve.node;
-        if (
-          possibleMaster.isMaster &&
-          possibleMaster.childVariantIds?.includes(variantId)
-        ) {
-          // Return the variant + product info
-          return {
-            masterVariant: possibleMaster,
-            masterProductTitle: prod.title,
-          };
-        }
-      }
-    }
-    return null;
-  }
-
-  // Setup a useEffect to flatten all variants for the child selection list
+  // Build a flattened list of all variants.
   useEffect(() => {
     const variantsList = [];
     products.forEach((prod) => {
@@ -246,124 +267,143 @@ export default function ProductsTable() {
     setAllVariants(variantsList);
   }, [products]);
 
-  // Expand or collapse product row
+  // Compute filtered, sorted, and paginated products.
+  const filteredProducts = products.filter((product) =>
+    product.title.toLowerCase().includes(query.toLowerCase())
+  );
+  const sortedProducts = [...filteredProducts].sort((a, b) => {
+    if (sortValue === "title") {
+      const result = a.title.localeCompare(b.title);
+      return sortDirection === "ascending" ? result : -result;
+    }
+    return 0;
+  });
+  const totalProducts = sortedProducts.length;
+  const paginatedProducts = sortedProducts.slice(
+    (currentPage - 1) * itemsPerPage,
+    currentPage * itemsPerPage
+  );
+
+  // Handle sorting (for instance, when clicking a header button).
+  const handleSort = useCallback((newSortValue, newSortDirection) => {
+    setSortValue(newSortValue);
+    setSortDirection(newSortDirection);
+  }, []);
+
+  // Toggle product row expansion.
   const toggleExpanded = useCallback(
-    (index) => () => {
-      setExpandedProductIndex((prev) => (prev === index ? -1 : index));
-    },
+    (index) => () => setExpandedProductIndex((prev) => (prev === index ? -1 : index)),
     []
   );
 
-  // INVENTORY MODAL
-  function toggleModal() {
-    setModalActive((prev) => !prev);
+  // Toggle expansion for a master variant row.
+  const toggleMasterVariant = (variantId) => {
+    setExpandedMasters((prev) =>
+      prev.includes(variantId) ? prev.filter((id) => id !== variantId) : [...prev, variantId]
+    );
+  };
+
+  // Helper function: returns the master variant for a given child variant.
+  function findMasterOfVariant(variantId) {
+    for (const prod of products) {
+      for (const ve of prod.variants.edges) {
+        const possibleMaster = ve.node;
+        if (possibleMaster.isMaster && possibleMaster.childVariantIds?.includes(variantId)) {
+          return {
+            masterVariant: possibleMaster,
+            masterProductId: prod.id,
+            masterProductTitle: prod.title,
+          };
+        }
+      }
+    }
+    return null;
   }
 
-  function openInventoryModal(product) {
+  // Determines whether a variant's checkbox should be disabled.
+  // For the master checkbox in the table, disable if the variant is already assigned in another product.
+  const isVariantAssignedElsewhere = (variant, currentProductId) => {
+    const found = findMasterOfVariant(variant.id);
+    return found && found.masterProductId !== currentProductId;
+  };
+
+  // For the children modal checkboxes, disable if the variant is already assigned elsewhere.
+  const isChildVariantAssignedElsewhere = (variant) => {
+    if (!selectedProduct) return false;
+    const found = findMasterOfVariant(variant.id);
+    return found && found.masterProductId !== selectedProduct.id;
+  };
+
+  function showToast(message) {
+    setToastMessage(message);
+    setToastActive(true);
+  }
+  function onDismissToast() {
+    setToastActive(false);
+    setToastMessage("");
+  }
+
+  // INVENTORY MODAL FUNCTIONS
+  function openMasterInventoryModal(product, masterVariant) {
     setSelectedProduct(product);
-    const invObj = {};
-    product.variants.edges.forEach((ve) => {
-      invObj[ve.node.id] = ve.node.inventoryQuantity;
-    });
-    setInventory(invObj);
-    toggleModal();
+    setSelectedVariant(masterVariant);
+    setInventory({ [masterVariant.id]: masterVariant.inventoryQuantity });
+    setModalActive(true);
   }
 
-  // CHILDREN MODAL
+  // CHILDREN MANAGEMENT MODAL FUNCTIONS
   function toggleChildrenModal() {
     setChildrenModalActive((prev) => !prev);
   }
-
   function openChildrenModal(product, variant) {
-    // If this variant is not a master, do not allow opening children config
-    // because rule #2 says a variant that is not master cannot have children.
     if (!variant.isMaster) {
-      showToast(
-        "Cannot manage children: this variant is not marked as Master."
-      );
+      showToast("Cannot manage children: this variant is not designated as Master.");
       return;
     }
-
     setSelectedProduct(product);
     setSelectedVariant(variant);
-
-    // Pre-populate the selection with the existing children
-    const existingChildren = variant.childVariantIds || [];
-    setChildrenSelection(existingChildren);
-
+    setChildrenSelection(variant.childVariantIds || []);
+    // Reset the modal search and pagination state.
+    setChildrenQuery("");
+    setChildrenCurrentPage(1);
     toggleChildrenModal();
   }
-
-  /**
-   * When toggling a child selection in the modal, we simply add/remove from local state.
-   * Final checks happen when user saves.
-   */
   function handleToggleChildSelection(variantGid) {
-    setChildrenSelection((prev) => {
-      if (prev.includes(variantGid)) {
-        return prev.filter((id) => id !== variantGid);
-      } else {
-        return [...prev, variantGid];
-      }
-    });
+    setChildrenSelection((prev) =>
+      prev.includes(variantGid)
+        ? prev.filter((id) => id !== variantGid)
+        : [...prev, variantGid]
+    );
   }
-
-  /**
-   * handleSaveChildren:
-   * Called when the user clicks "Save Children" in the children modal.
-   * We'll confirm that none of these children are themselves masters or already children of a different master.
-   * If any invalid config is found, we show a toast and do not save.
-   */
   function handleSaveChildren() {
     if (!selectedVariant) return;
-
-    // We'll do some validation checks.
-    // 1) Gather invalid children.
     const invalidChildren = [];
-
     childrenSelection.forEach((childId) => {
-      // Find the variant's full data from allVariants
       const childData = allVariants.find((v) => v.id === childId);
-      if (!childData) return; // skip if not found
-
-      // a) If child is Master, it's invalid.
+      if (!childData) return;
       if (childData.isMaster) {
         invalidChildren.push({
           childId,
-          reason: `Variant ${parseVariantId(childId)} is Master, cannot be a child.`,
+          reason: `Variant ${parseVariantId(childId)} is a Master variant and cannot be assigned as a child.`,
         });
         return;
       }
-
-      // b) If child is already a child of a different master
       const foundMaster = findMasterOfVariant(childId);
-      if (
-        foundMaster &&
-        // We only block if the master is not the same as the one we're editing
-        foundMaster.masterVariant.id !== selectedVariant.id
-      ) {
+      if (foundMaster && foundMaster.masterVariant.id !== selectedVariant.id) {
         invalidChildren.push({
           childId,
-          reason: `Variant ${parseVariantId(childId)} is already a child of master variant in '${foundMaster.masterProductTitle}'`,
+          reason: `Variant ${parseVariantId(childId)} is already a child of '${foundMaster.masterProductTitle}'.`,
         });
       }
     });
-
     if (invalidChildren.length > 0) {
-      // We'll just show the first error reason for simplicity,
-      // or we can show them all if we prefer.
-      showToast(
-        `Cannot save children. ${invalidChildren[0].reason}`
-      );
+      showToast(`Cannot save children. ${invalidChildren[0].reason}`);
       return;
     }
-
-    // If we pass validation, save to server.
     handleAddChildren(selectedVariant.id, childrenSelection);
     toggleChildrenModal();
   }
 
-  // Update or remove a variant's master metafield
   async function updateMasterMetafield(variantId, isMaster) {
     try {
       const response = await fetch("/api/update-variant-metafield", {
@@ -376,42 +416,21 @@ export default function ProductsTable() {
           value: isMaster ? "true" : "false",
         }),
       });
-      if (!response.ok) {
-        throw new Error("Failed to update variant-level 'master' metafield");
-      }
+      if (!response.ok) throw new Error("Failed to update the 'master' metafield");
     } catch (error) {
       console.error("Error updating 'master' metafield:", error);
       throw error;
     }
   }
 
-  /**
-   * handleMasterCheckboxChange:
-   * When the user toggles the checkbox to mark a variant as Master or not.
-   * We enforce rule #1: if the variant is a child of any master, it cannot become master.
-   * Also, if the variant is master, it cannot be in someone else's children.
-   */
   async function handleMasterCheckboxChange(productId, variantId, newChecked) {
-    // We'll do some checks before we finalize.
-
-    // 1) If the user is trying to set it to Master (newChecked = true)
-    //    verify that this variant is NOT already a child of another master.
     if (newChecked) {
       const foundMaster = findMasterOfVariant(variantId);
       if (foundMaster) {
-        // This means we found a different master that includes this variant.
-        showToast(
-          `Cannot set as master. This variant is already a child of a master in '${foundMaster.masterProductTitle}'.`
-        );
-        return; // do not proceed
+        showToast(`Cannot set as master. This variant is already a child of '${foundMaster.masterProductTitle}'.`);
+        return;
       }
-    } else {
-      // If the user is UNchecking, i.e. removing Master status,
-      // we do not strictly block it, even if it has children. But we could.
-      // For now, let's allow it.
     }
-
-    // 2) Optimistic UI update
     setProducts((prev) =>
       prev.map((prod) => {
         if (prod.id !== productId) return prod;
@@ -434,14 +453,9 @@ export default function ProductsTable() {
         return { ...prod, variants: { edges: updatedEdges } };
       })
     );
-
-    // 3) Update on server
     try {
       await updateMasterMetafield(variantId, newChecked);
-      // Optionally revalidate
-      // revalidator.revalidate();
     } catch (error) {
-      // If server fails, revert
       console.error("Failed to update master metafield on server:", error);
       setProducts((prev) =>
         prev.map((prod) => {
@@ -468,14 +482,8 @@ export default function ProductsTable() {
     }
   }
 
-  /**
-   * handleAddChildren:
-   * Actually saves the children IDs to the server for the given Master variant.
-   * Then triggers a revalidation to refresh data.
-   */
   async function handleAddChildren(variantId, newChildren) {
     if (!variantId) return;
-
     try {
       const response = await fetch("/api/update-variant-metafield", {
         method: "POST",
@@ -487,11 +495,7 @@ export default function ProductsTable() {
           value: JSON.stringify(newChildren),
         }),
       });
-      if (!response.ok) {
-        throw new Error("Failed to update childrenkey");
-      }
-
-      // Optimistic update
+      if (!response.ok) throw new Error("Failed to update childrenkey");
       setProducts((prev) =>
         prev.map((prod) => {
           const newEdges = prod.variants.edges.map((edge) => {
@@ -513,412 +517,495 @@ export default function ProductsTable() {
           return { ...prod, variants: { edges: newEdges } };
         })
       );
-
-      // Force a data refresh
       revalidator.revalidate();
     } catch (error) {
       console.error("Error updating childrenkey:", error);
     }
   }
 
-  /**
-   * handleInventoryChange:
-   * Update local state with the user-specified quantity.
-   */
   function handleInventoryChange(variantId, newQuantity) {
     setInventory((prev) => ({ ...prev, [variantId]: newQuantity }));
   }
 
-  /**
-   * updateInventory:
-   * Saves all the updated quantities to the server for each variant of the selected product.
-   * Then revalidates to refresh the data.
-   */
   async function updateInventory() {
-    if (!selectedProduct) return;
-
+    if (!selectedProduct || !selectedVariant) return;
     try {
-      // Send an API call for each variant
-      const calls = Object.entries(inventory).map(([varId, qty]) =>
-        fetch("/api/update-inventory", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            variantId: varId,
-            newQuantity: Number(qty),
-          }),
-        })
-      );
-      await Promise.all(calls);
-
-      // Optimistic update
+      const variantId = selectedVariant.id;
+      const qty = inventory[variantId];
+      await fetch("/api/update-inventory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ variantId, newQuantity: Number(qty) }),
+      });
       setProducts((prev) =>
         prev.map((prod) => {
           if (prod.id !== selectedProduct.id) return prod;
-          const newEdges = prod.variants.edges.map((edge) => {
-            if (edge.node.id in inventory) {
-              return {
-                ...edge,
-                node: {
-                  ...edge.node,
-                  inventoryQuantity: Number(inventory[edge.node.id]),
-                },
-              };
-            }
-            return edge;
-          });
+          const newEdges = prod.variants.edges.map((edge) =>
+            edge.node.id === variantId
+              ? { ...edge, node: { ...edge.node, inventoryQuantity: Number(qty) } }
+              : edge
+          );
           return { ...prod, variants: { edges: newEdges } };
         })
       );
-
-      toggleModal();
-
-      // Refresh from server
+      setModalActive(false);
       revalidator.revalidate();
     } catch (error) {
-      console.error("Error in updateInventory:", error);
+      console.error("Error updating inventory:", error);
     }
   }
 
-  // RENDER
+  async function updateQtyManagement(variantId, newQty) {
+    try {
+      const response = await fetch("/api/update-variant-metafield", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          variantId,
+          namespace: "projektstocksyncqtymanagement",
+          key: "qtymanagement",
+          value: String(parseInt(newQty, 10)),
+        }),
+      });
+      if (!response.ok) throw new Error("Failed to update the qty management metafield");
+      showToast(`Quantity management updated for variant ${parseVariantId(variantId)}`);
+    } catch (error) {
+      console.error("Error updating qty management metafield:", error);
+      showToast(`Error updating quantity management for variant ${parseVariantId(variantId)}`);
+    }
+  }
+
+  // Function to determine the status and corresponding row background colour.
+  // Returns an object with a status label and the background colour.
+  function getVariantStatus(variant) {
+    let status = "";
+    if (variant.isMaster) {
+      status = "Master";
+    } else if (findMasterOfVariant(variant.id)) {
+      status = "Child";
+    } else {
+      status = "Unassigned";
+    }
+
+    let bgColour = "#ffffff"; // Default for unassigned.
+    if (status === "Master") bgColour = "#333333"; // Light green.
+    else if (status === "Child") bgColour = "#fff4e5"; // Pale orange.
+
+    return { status, bgColour };
+  }
+
   return (
     <Frame>
       <Page title="All Products">
-        <Layout>
-          <Layout.Section>
-            <Card>
-              <IndexTable
-                itemCount={products.length}
-                selectable={false}
-                headings={[
-                  { title: "Product / Variant" },
-                  { title: "Date Created" },
-                  { title: "Active Masters" },
-                  { title: "Actions" },
-                ]}
-              >
-                {products.map((product, productIndex) => {
-                  const isExpanded = expandedProductIndex === productIndex;
-
-                  // Count how many variants are Master
-                  const masterCount = product.variants.edges.filter(
-                    (edge) => edge.node.isMaster
-                  ).length;
-
-                  // MAIN PRODUCT ROW
-                  const productRowMarkup = (
-                    <IndexTable.Row
-                      id={product.id}
-                      key={product.id}
-                      position={productIndex}
-                      onClick={toggleExpanded(productIndex)}
-                    >
-                      <IndexTable.Cell>
-                        <Thumbnail
-                          source={
-                            product.images.edges[0]?.node.originalSrc || ""
-                          }
-                          alt={product.title}
-                        />
-                        &nbsp; {product.title} ( {" "}
-                        {product.variants.edges.length} variants )
-                      </IndexTable.Cell>
-
-                      <IndexTable.Cell>
-                        {new Date(product.createdAt).toLocaleDateString()}
-                      </IndexTable.Cell>
-
-                      <IndexTable.Cell>{masterCount}</IndexTable.Cell>
-
-                      <IndexTable.Cell>
-                        <Button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openInventoryModal(product);
-                          }}
-                        >
-                          Edit Inventory
-                        </Button>
-                      </IndexTable.Cell>
-                    </IndexTable.Row>
-                  );
-
-                  // If expanded, show each variant and possible child variants
-                  let variantSubRows = null;
-                  if (isExpanded) {
-                    variantSubRows = product.variants.edges.map(
-                      (variantEdge, variantIndex) => {
-                        const variant = variantEdge.node;
-                        const { isMaster, childVariants } = variant;
-
-                        // fallback to product image if no variant image
-                        const variantImage =
-                          variant.image?.originalSrc ||
-                          product.images.edges[0]?.node.originalSrc ||
-                          "";
-
-                        const shortVariantId = parseVariantId(variant.id);
-
-                        const variantRow = (
-                          <IndexTable.Row
-                            subrow
-                            id={`variant-${variant.id}`}
-                            key={variant.id}
-                            position={productIndex + 1 + variantIndex}
-                          >
-                            <IndexTable.Cell>
-                              <div
-                                style={{
-                                  marginLeft: "2rem",
-                                  display: "flex",
-                                  alignItems: "center",
-                                }}
-                              >
-                                <Thumbnail
-                                  source={variantImage}
-                                  size="small"
-                                  alt={variant.title}
-                                />
-                                <div style={{ marginLeft: "1rem" }}>
-                                  <Tag>Variant: {variant.title}</Tag>
-                                  <p>ID: {shortVariantId}</p>
-                                  <p>
-                                    Inventory: {variant.inventoryQuantity ?? 0}
-                                  </p>
-                                </div>
-                              </div>
-                            </IndexTable.Cell>
-                            <IndexTable.Cell />
-                            <IndexTable.Cell>
-                              {/* Checkbox to toggle Master status */}
-                              <Checkbox
-                                checked={isMaster}
-                                onChange={(checked) =>
-                                  handleMasterCheckboxChange(
-                                    product.id,
-                                    variant.id,
-                                    checked
-                                  )
-                                }
-                              />
-                            </IndexTable.Cell>
-                            <IndexTable.Cell>
-                              {isMaster && (
-                                <Button
-                                  primary
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    openChildrenModal(product, variant);
-                                  }}
-                                  style={{ marginLeft: "0.5rem" }}
-                                >
-                                  Manage Children
-                                </Button>
-                              )}
-                            </IndexTable.Cell>
-                          </IndexTable.Row>
-                        );
-
-                        // CHILD ROWS
-                        let childVariantRows = [];
-                        if (isMaster && childVariants?.length > 0) {
-                          childVariantRows = childVariants.map(
-                            (childVar, childIndex) => {
-                              const childImage =
-                                childVar.image?.originalSrc ||
-                                childVar.product?.images?.edges?.[0]?.node
-                                  .originalSrc ||
-                                "";
-                              const childTitle =
-                                childVar.product?.title || "Untitled";
-                              const shortChildId = parseVariantId(childVar.id);
-
-                              return (
-                                <IndexTable.Row
-                                  subrow
-                                  id={`childVar-${childVar.id}`}
-                                  key={childVar.id}
-                                  position={
-                                    productIndex + 2 + variantIndex + childIndex
-                                  }
-                                >
-                                  <IndexTable.Cell colSpan={4}>
-                                    <div
-                                      style={{
-                                        marginLeft: "4rem",
-                                        display: "flex",
-                                        alignItems: "center",
-                                      }}
-                                    >
-                                      <Thumbnail
-                                        source={childImage}
-                                        alt={childTitle}
-                                        size="small"
-                                      />
-                                      <div style={{ marginLeft: "1rem" }}>
-                                        <Tag>
-                                          Child Variant: {shortChildId}
-                                        </Tag>
-                                        <p>
-                                          <strong>Product:</strong> {childTitle}
-                                        </p>
-                                        <p>
-                                          <strong>Inventory:</strong>{" "}
-                                          {childVar.inventoryQuantity ?? "??"}
-                                        </p>
-                                      </div>
-                                    </div>
-                                  </IndexTable.Cell>
-                                </IndexTable.Row>
-                              );
-                            }
-                          );
-                        }
-
-                        return (
-                          <React.Fragment key={variant.id}>
-                            {variantRow}
-                            {childVariantRows}
-                          </React.Fragment>
-                        );
-                      }
-                    );
-                  }
-
-                  return (
-                    <React.Fragment key={product.id}>
-                      {productRowMarkup}
-                      {variantSubRows}
-                    </React.Fragment>
-                  );
-                })}
-              </IndexTable>
-            </Card>
-          </Layout.Section>
-        </Layout>
-
-        {/* INVENTORY MODAL */}
-        {modalActive && selectedProduct && (
-          <Modal
-            open={modalActive}
-            onClose={toggleModal}
-            title={`Editing Inventory - ${selectedProduct.title}`}
-            primaryAction={{
-              content: "Save Inventory",
-              onAction: updateInventory,
+        {/* Search Bar for products */}
+        <Box paddingBlock="4">
+          <TextField
+            label="Search Products"
+            value={query}
+            onChange={(value) => {
+              setQuery(value);
+              setCurrentPage(1); // Reset to first page when searching.
             }}
-            secondaryActions={[
-              {
-                content: "Close",
-                onAction: toggleModal,
-              },
-            ]}
-          >
-            <Modal.Section>
-              <TextContainer>
-                <p>
-                  Adjust the inventory for all variants of {" "}
-                  {selectedProduct.title} below:
-                </p>
-              </TextContainer>
+            placeholder="Search by product title"
+          />
+        </Box>
+        <Box
+          style={{
+            '--pc-box-padding-block-start-xs': '0',
+            '--pc-box-padding-block-end-xs': '0',
+            '--pc-box-padding-inline-start-xs': '0',
+            '--pc-box-padding-inline-end-xs': '0',
+          }}
+        >
+          <Card>
+            <IndexTable
+              headings={[
+                { title: "Image" },
+                {
+                  title: "Details",
+                  sortable: true,
+                  onSort: handleSort,
+                  sortDirection: sortValue === "title" ? sortDirection : undefined,
+                },
+                { title: "Status" },
+                { title: "Inventory" },
+                { title: "Master" },
+                { title: "Actions" },
+              ]}
+              itemCount={paginatedProducts.length}
+              selectable={false}
+            >
+              {paginatedProducts.map((product, productIndex) => {
+                const isProductExpanded = expandedProductIndex === productIndex;
 
-              {selectedProduct.variants.edges.map((ve) => {
-                const variantObj = ve.node;
-                const shortVariantId = parseVariantId(variantObj.id);
+                // Product row: Display a tag with variant count and product title.
+                // Extra cells have been added for the new columns.
+                const productRowMarkup = (
+                  <IndexTable.Row
+                    id={product.id}
+                    key={product.id}
+                    position={productIndex}
+                    onClick={toggleExpanded(productIndex)}
+                    style={{ backgroundColor: isProductExpanded ? "#e6e6e6" : "white" }}
+                  >
+                    <IndexTable.Cell>
+                      <Thumbnail
+                        source={product.images.edges[0]?.node.originalSrc || ""}
+                        alt={product.title}
+                      />
+                    </IndexTable.Cell>
+                    <IndexTable.Cell>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                        <Tag style={{ display: "inline-block", width: "auto" }}>
+                          {product.variants.edges.length} variants
+                        </Tag>
+                        <Text as="span" variant="headingMd" fontWeight="semibold">
+                          {product.title}
+                        </Text>
+                      </div>
+                    </IndexTable.Cell>
+                    <IndexTable.Cell>{/* Status column (empty for product row) */}</IndexTable.Cell>
+                    <IndexTable.Cell>{/* Inventory column (empty for product row) */}</IndexTable.Cell>
+                    <IndexTable.Cell>{/* Master column (empty for product row) */}</IndexTable.Cell>
+                    <IndexTable.Cell>{/* Actions column (empty for product row) */}</IndexTable.Cell>
+                  </IndexTable.Row>
+                );
+
+                let variantSubRows = null;
+                if (isProductExpanded) {
+                  variantSubRows = product.variants.edges.map((variantEdge, variantIndex) => {
+                    const variant = variantEdge.node;
+                    const { status, bgColour } = getVariantStatus(variant);
+                    const shortVariantId = parseVariantId(variant.id);
+
+                    // Determine if the master checkbox should be disabled.
+                    const masterCheckboxDisabled =
+                      !variant.isMaster && isVariantAssignedElsewhere(variant, product.id);
+
+                    // Master variant row layout.
+                    const variantRow = (
+                      <IndexTable.Row
+                        subrow
+                        id={`variant-${variant.id}`}
+                        key={variant.id}
+                        position={productIndex + 1 + variantIndex}
+                        onClick={(e) => {
+                          if (e && typeof e.stopPropagation === "function") {
+                            e.stopPropagation();
+                          }
+                          toggleMasterVariant(variant.id);
+                        }}
+                        style={{ backgroundColor: bgColour }}
+                      >
+                        <IndexTable.Cell>
+                          <Thumbnail source={variant.image?.originalSrc || product.images.edges[0]?.node.originalSrc || ""} size="small" alt={variant.title} />
+                        </IndexTable.Cell>
+                        <IndexTable.Cell>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                            {variant.isMaster ? (
+                              <Tag status="success" style={{ display: "inline-block", width: "auto" }}>
+                                Variant Master – {shortVariantId}
+                              </Tag>
+                            ) : (
+                              <Tag status={status === "Child" ? "warning" : "default"} style={{ display: "inline-block", width: "auto" }}>
+                                Variant – {shortVariantId}
+                              </Tag>
+                            )}
+                            <Text as="span" variant="headingSm">
+                              {variant.title}
+                            </Text>
+                          </div>
+                        </IndexTable.Cell>
+                        {/* Status column */}
+                        <IndexTable.Cell>
+                          {variant.isMaster ? (
+                            <Tag status="success" size="small">
+                              Master
+                            </Tag>
+                          ) : findMasterOfVariant(variant.id) ? (
+                            <Tag status="warning" size="small">
+                              Child
+                            </Tag>
+                          ) : (
+                            <Tag size="small">
+                              Unassigned
+                            </Tag>
+                          )}
+                        </IndexTable.Cell>
+                        <IndexTable.Cell>
+                          <Text as="span" variant="bodySm">
+                            Inventory: {variant.inventoryQuantity ?? 0}
+                          </Text>
+                        </IndexTable.Cell>
+                        <IndexTable.Cell>
+                          <Checkbox
+                            checked={variant.isMaster}
+                            disabled={masterCheckboxDisabled}
+                            onChange={(checked) =>
+                              handleMasterCheckboxChange(product.id, variant.id, checked)
+                            }
+                          />
+                        </IndexTable.Cell>
+                        <IndexTable.Cell>
+                          <div style={{ display: "flex", gap: "0.5rem" }}>
+                            <Button
+                              primary
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openChildrenModal(product, variant);
+                              }}
+                            >
+                              Manage Children
+                            </Button>
+                            <Button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openMasterInventoryModal(product, variant);
+                              }}
+                            >
+                              Edit Inventory
+                            </Button>
+                          </div>
+                        </IndexTable.Cell>
+                      </IndexTable.Row>
+                    );
+
+                    // Child variant row layout.
+                    const childVariantRows =
+                      variant.isMaster && variant.childVariants?.length > 0
+                        ? variant.childVariants.map((childVar, childIndex) => {
+                            const shortChildId = parseVariantId(childVar.id);
+                            const currentQtyValue =
+                              qtyManagementValues[childVar.id] !== undefined
+                                ? qtyManagementValues[childVar.id]
+                                : childVar.qtyManagementMetafield?.value ?? "";
+                            // Child rows are always considered "Child"
+                            const childBgColour = "#fff4e5";
+                            return (
+                              <IndexTable.Row
+                                subrow
+                                id={`childVar-${childVar.id}`}
+                                key={childVar.id}
+                                position={productIndex + 2 + variantIndex + childIndex}
+                                style={{ backgroundColor: childBgColour }}
+                              >
+                                <IndexTable.Cell>
+                                  <Thumbnail source={childVar.image?.originalSrc || childVar.product?.images?.edges?.[0]?.node.originalSrc || ""} alt={childVar.product?.title || "Untitled"} size="small" />
+                                </IndexTable.Cell>
+                                <IndexTable.Cell>
+                                  <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                                    <Tag status="warning" style={{ display: "inline-block", width: "auto" }}>
+                                      Variant – {shortChildId}
+                                    </Tag>
+                                    <Text as="span" variant="headingSm">
+                                      {childVar.product?.title || "Untitled"}
+                                    </Text>
+                                  </div>
+                                </IndexTable.Cell>
+                                {/* Status column for child variant */}
+                                <IndexTable.Cell>
+                                  <Tag status="warning" size="small">
+                                    Child
+                                  </Tag>
+                                </IndexTable.Cell>
+                                <IndexTable.Cell>
+                                  <Text as="span" variant="bodySm" fontWeight="bold">
+                                    Stock: {childVar.inventoryQuantity ?? 0}
+                                  </Text>
+                                </IndexTable.Cell>
+                                <IndexTable.Cell>{/* No master checkbox for child variants */}</IndexTable.Cell>
+                                <IndexTable.Cell>
+                                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+                                    <Text as="span" variant="bodySm" fontWeight="bold" style={{ marginBottom: "0.5rem" }}>
+                                      Child Times
+                                    </Text>
+                                    <TextField
+                                      label=""
+                                      placeholder="Qty"
+                                      type="number"
+                                      value={currentQtyValue}
+                                      onChange={(value) =>
+                                        setQtyManagementValues((prev) => ({
+                                          ...prev,
+                                          [childVar.id]: value,
+                                        }))
+                                      }
+                                      onBlur={() =>
+                                        updateQtyManagement(
+                                          childVar.id,
+                                          qtyManagementValues[childVar.id] !== undefined
+                                            ? qtyManagementValues[childVar.id]
+                                            : currentQtyValue
+                                        )
+                                      }
+                                      style={{ width: "80px" }}
+                                    />
+                                  </div>
+                                </IndexTable.Cell>
+                              </IndexTable.Row>
+                            );
+                          })
+                        : [];
+                    return (
+                      <React.Fragment key={variant.id}>
+                        {variantRow}
+                        {childVariantRows}
+                      </React.Fragment>
+                    );
+                  });
+                }
+
                 return (
-                  <div key={variantObj.id} style={{ marginBottom: "1rem" }}>
-                    <Tag>Variant: {variantObj.title}</Tag>
-                    <p>ID: {shortVariantId}</p>
-                    <TextField
-                      label="Inventory Quantity"
-                      type="number"
-                      value={String(inventory[variantObj.id] ?? "")}
-                      onChange={(value) =>
-                        handleInventoryChange(variantObj.id, value)
-                      }
-                    />
-                  </div>
+                  <React.Fragment key={product.id}>
+                    {productRowMarkup}
+                    {variantSubRows}
+                  </React.Fragment>
                 );
               })}
-            </Modal.Section>
-          </Modal>
-        )}
-
-        {/* CHILDREN MANAGEMENT MODAL */}
-        {childrenModalActive && selectedVariant && (
-          <Modal
-            open={childrenModalActive}
-            onClose={toggleChildrenModal}
-            title={`Manage Children for Master Variant ${parseVariantId(
-              selectedVariant.id
-            )}`}
-            primaryAction={{
-              content: "Save Children",
-              onAction: handleSaveChildren,
-            }}
-            secondaryActions={[
-              {
-                content: "Cancel",
-                onAction: toggleChildrenModal,
-              },
-            ]}
-          >
-            <Modal.Section>
-              <TextContainer>
-                <p>
-                  Below you can select which variants should become children of
-                  this master variant. Current selections are pre-checked.
-                </p>
-              </TextContainer>
-              {allVariants.length === 0 && <Spinner accessibilityLabel="Loading" />}
-              {allVariants.length > 0 && (
-                <ResourceList
-                  resourceName={{ singular: "variant", plural: "variants" }}
-                  items={allVariants.filter((v) => v.id !== selectedVariant.id)}
-                  renderItem={(item) => {
-                    const shortId = parseVariantId(item.id);
-                    const media = (
-                      <Thumbnail
-                        source={
-                          item.image?.originalSrc || item.productImage || ""
-                        }
-                        size="small"
-                        alt={item.title}
-                      />
-                    );
-                    const isChecked = childrenSelection.includes(item.id);
-
-                    return (
-                      <ResourceItem
-                        id={item.id}
-                        media={media}
-                        accessibilityLabel={`Select ${item.title}`}
-                      >
-                        <div
-                          style={{ display: "flex", alignItems: "center" }}
-                        >
-                          <Checkbox
-                            checked={isChecked}
-                            onChange={() => handleToggleChildSelection(item.id)}
-                          />
-                          <div style={{ marginLeft: "1rem" }}>
-                            <Tag>
-                              {item.productTitle} - Variant: {item.title}
-                            </Tag>
-                            <p>ID: {shortId}</p>
-                          </div>
-                        </div>
-                      </ResourceItem>
-                    );
-                  }}
-                />
-              )}
-            </Modal.Section>
-          </Modal>
-        )}
+            </IndexTable>
+          </Card>
+        </Box>
+        {/* Product-level Pagination */}
+        <Box paddingBlock="4">
+          <Pagination
+            hasPrevious={currentPage > 1}
+            onPrevious={() => setCurrentPage((prev) => prev - 1)}
+            hasNext={currentPage < Math.ceil(totalProducts / itemsPerPage)}
+            onNext={() => setCurrentPage((prev) => prev + 1)}
+          />
+        </Box>
       </Page>
 
-      {/* TOAST FOR ERROR NOTIFICATIONS */}
+      {modalActive && selectedProduct && selectedVariant && (
+        <Modal
+          open={modalActive}
+          onClose={() => setModalActive(false)}
+          title={`Editing Inventory – ${selectedVariant.title}`}
+          primaryAction={{ content: "Save Inventory", onAction: updateInventory }}
+          secondaryActions={[{ content: "Close", onAction: () => setModalActive(false) }]}
+        >
+          <Modal.Section>
+            <TextContainer>
+              <p>
+                Please adjust the inventory for the master variant “{selectedVariant.title}” below:
+              </p>
+            </TextContainer>
+            <div style={{ marginBottom: "1rem" }}>
+              <Tag style={{ display: "inline-block", width: "auto" }}>
+                Master: {selectedVariant.title}
+              </Tag>
+              <p>ID: {parseVariantId(selectedVariant.id)}</p>
+              <TextField
+                label="Inventory Quantity"
+                type="number"
+                value={String(inventory[selectedVariant.id] ?? "")}
+                onChange={(value) =>
+                  handleInventoryChange(selectedVariant.id, value)
+                }
+              />
+            </div>
+          </Modal.Section>
+        </Modal>
+      )}
+
+      {childrenModalActive && selectedVariant && selectedProduct && (
+        <Modal
+          open={childrenModalActive}
+          onClose={toggleChildrenModal}
+          title={`Manage Children for Master Variant ${parseVariantId(selectedVariant.id)}`}
+          primaryAction={{ content: "Save Children", onAction: handleSaveChildren }}
+          secondaryActions={[{ content: "Cancel", onAction: toggleChildrenModal }]}
+        >
+          <Modal.Section>
+            <TextContainer>
+              <p>
+                Please select which variants should be assigned as children for this master variant. Current selections are pre-checked.
+              </p>
+            </TextContainer>
+            {/* Children management modal search bar */}
+            <Box paddingBlock="2">
+              <TextField
+                label="Search Children"
+                value={childrenQuery}
+                onChange={(value) => {
+                  setChildrenQuery(value);
+                  setChildrenCurrentPage(1); // Reset page when a new search is performed.
+                }}
+                placeholder="Search by variant title"
+              />
+            </Box>
+            {allVariants.length === 0 && <Spinner accessibilityLabel="Loading" />}
+            {allVariants.length > 0 && (
+              <ResourceList
+                resourceName={{ singular: "variant", plural: "variants" }}
+                items={allVariants
+                  .filter((v) =>
+                    v.id !== selectedVariant.id &&
+                    (v.title.toLowerCase().includes(childrenQuery.toLowerCase()) ||
+                     v.productTitle.toLowerCase().includes(childrenQuery.toLowerCase()))
+                  )
+                  .slice(
+                    (childrenCurrentPage - 1) * childrenItemsPerPage,
+                    childrenCurrentPage * childrenItemsPerPage
+                  )}
+                renderItem={(item) => {
+                  const shortId = parseVariantId(item.id);
+                  const media = (
+                    <Thumbnail
+                      source={item.image?.originalSrc || item.productImage || ""}
+                      size="small"
+                      alt={item.title}
+                    />
+                  );
+                  const isChecked = childrenSelection.includes(item.id);
+                  // Disable checkbox if the variant is already assigned in another product.
+                  const disabledCheckbox = isChildVariantAssignedElsewhere(item);
+                  return (
+                    <ResourceItem
+                      id={item.id}
+                      media={media}
+                      accessibilityLabel={`Select ${item.title}`}
+                    >
+                      <div style={{ display: "flex", alignItems: "center" }}>
+                        <Checkbox
+                          checked={isChecked}
+                          disabled={disabledCheckbox}
+                          onChange={() => handleToggleChildSelection(item.id)}
+                        />
+                        <div style={{ marginLeft: "1rem" }}>
+                          <Tag style={{ display: "inline-block", width: "auto" }}>
+                            {item.productTitle} – Variant: {item.title}
+                          </Tag>
+                          <p>ID: {shortId}</p>
+                        </div>
+                      </div>
+                    </ResourceItem>
+                  );
+                }}
+              />
+            )}
+            {/* Children management modal pagination */}
+            <Box paddingBlock="2">
+              <Pagination
+                hasPrevious={childrenCurrentPage > 1}
+                onPrevious={() => setChildrenCurrentPage((prev) => prev - 1)}
+                hasNext={
+                  childrenCurrentPage <
+                  Math.ceil(
+                    allVariants.filter((v) =>
+                      v.id !== selectedVariant.id &&
+                      (v.title.toLowerCase().includes(childrenQuery.toLowerCase()) ||
+                       v.productTitle.toLowerCase().includes(childrenQuery.toLowerCase()))
+                    ).length / childrenItemsPerPage
+                  )
+                }
+                onNext={() => setChildrenCurrentPage((prev) => prev + 1)}
+              />
+            </Box>
+          </Modal.Section>
+        </Modal>
+      )}
+
       {toastActive && (
         <Toast content={toastMessage} onDismiss={onDismissToast} error />
       )}
