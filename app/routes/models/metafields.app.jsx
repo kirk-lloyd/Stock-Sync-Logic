@@ -68,6 +68,15 @@ export const action = async ({ request }) => {
       type: "number_integer",
       ownerType: "PRODUCTVARIANT",
     },
+    {
+      namespace: "projektstocksyncqtyold",
+      key: "qtyold",
+      name: "Projekt Sync - Qty Old",
+      description:
+        "This metafield is used to save the old quantity of the product",
+      type: "number_integer",
+      ownerType: "PRODUCTVARIANT",
+    },    
   ];
 
   for (const metafield of requiredMetafields) {
