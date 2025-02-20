@@ -1,5 +1,6 @@
 import { json } from "@remix-run/node";
 import crypto from "crypto";
+import prisma from "../db.server.js"; // Adjust the import path based on your project structure
 
 /**
  * ------------------------------------------------------------------
@@ -18,7 +19,7 @@ import crypto from "crypto";
  *    or rounding.
  *
  * 4) A fallback query in getChildrenInventoryItems(...) to handle missing
- *    CHILD variants that aren't in the same product as the MASTER.
+ *    CHILD variants that might not be in the same product as the MASTER.
  *
  * 5) Standard concurrency locks, dedup checks, and predicted update logic
  *    to avoid infinite loops or repeated partial processing.
@@ -103,6 +104,29 @@ function verifyHmac(body, hmacHeader, secret) {
 
 /*
  * ------------------------------------------------------------------
+ * UTILITY: RETRIEVE ADMIN HEADERS AND GRAPHQL URL FOR A GIVEN SHOP
+ * ------------------------------------------------------------------
+ */
+async function getShopSessionHeaders(shopDomain) {
+  // Look up the session in your database
+  const session = await prisma.session.findFirst({
+    where: { shop: shopDomain },
+  });
+  if (!session || !session.accessToken) {
+    throw new Error(`No session or accessToken found for shop: ${shopDomain}`);
+  }
+
+  // Return the token assigned to that specific shop
+  return {
+    adminHeaders: {
+      "X-Shopify-Access-Token": session.accessToken,
+    },
+    adminApiUrl: `https://${shopDomain}/admin/api/2024-10/graphql.json`,
+  };
+}
+
+/*
+ * ------------------------------------------------------------------
  * 2) ACTIVATE AN INVENTORY ITEM IN A LOCATION (IF NOT ACTIVE)
  * ------------------------------------------------------------------
  */
@@ -134,9 +158,9 @@ const TOGGLE_ACTIVATION_MUTATION = `
   }
 `;
 
-async function activateInventoryItem(adminHeaders, inventoryItemId, locationId) {
+async function activateInventoryItem(shopDomain, adminHeaders, inventoryItemId, locationId) {
   const response = await fetch(
-    "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
+    `https://${shopDomain}/admin/api/2024-10/graphql.json`,
     {
       method: "POST",
       headers: {
@@ -170,7 +194,14 @@ async function activateInventoryItem(adminHeaders, inventoryItemId, locationId) 
  * 3) MUTATION => CHANGE INVENTORY QUANTITY
  * ------------------------------------------------------------------
  */
-async function setInventoryQuantity(adminHeaders, inventoryItemId, locationId, quantity, internal = false) {
+async function setInventoryQuantity(
+  shopDomain,
+  adminHeaders,
+  inventoryItemId,
+  locationId,
+  quantity,
+  internal = false
+) {
   let cleanInventoryItemId;
   if (typeof inventoryItemId === "string") {
     if (inventoryItemId.startsWith("gid://shopify/InventoryItem/")) {
@@ -182,11 +213,13 @@ async function setInventoryQuantity(adminHeaders, inventoryItemId, locationId, q
     cleanInventoryItemId = `gid://shopify/InventoryItem/${inventoryItemId}`;
   }
 
+  // Custom reference for app-based updates (optional)
+  const MY_APP_URL = process.env.MY_APP_URL || "https://your-app-url.com";
   const referenceDocumentUriValue = internal
-    ? "https://b95d-114-76-63-0.ngrok-free.app/by_app/internal-update"
-    : "https://b95d-114-76-63-0.ngrok-free.app/external-update";
+    ? `${MY_APP_URL}/by_app/internal-update`
+    : `${MY_APP_URL}/by_app/external-update`;
 
-  // Mark predicted
+  // Mark a "predicted" update to avoid loops
   const pKey = buildPredictedKey(
     cleanInventoryItemId.replace("gid://shopify/InventoryItem/", ""),
     locationId,
@@ -199,7 +232,7 @@ async function setInventoryQuantity(adminHeaders, inventoryItemId, locationId, q
   );
 
   const response = await fetch(
-    "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
+    `https://${shopDomain}/admin/api/2024-10/graphql.json`,
     {
       method: "POST",
       headers: {
@@ -250,10 +283,10 @@ async function setInventoryQuantity(adminHeaders, inventoryItemId, locationId, q
 
 /*
  * ------------------------------------------------------------------
- * 3.1) GET/SET QTYOLD METAFIELD (using 'metafieldsSet')
+ * 3.1) GET/SET QTYOLD METAFIELD
  * ------------------------------------------------------------------
  */
-async function getQtyOldValue(adminHeaders, variantId) {
+async function getQtyOldValue(shopDomain, adminHeaders, variantId) {
   const query = `
     query GetQtyOld($id: ID!) {
       productVariant(id: $id) {
@@ -266,7 +299,7 @@ async function getQtyOldValue(adminHeaders, variantId) {
   const variables = { id: variantId };
 
   const resp = await fetch(
-    "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
+    `https://${shopDomain}/admin/api/2024-10/graphql.json`,
     {
       method: "POST",
       headers: {
@@ -284,7 +317,7 @@ async function getQtyOldValue(adminHeaders, variantId) {
   return parseInt(valStr, 10) || 0;
 }
 
-async function setQtyOldValue(adminHeaders, variantId, newQty) {
+async function setQtyOldValue(shopDomain, adminHeaders, variantId, newQty) {
   const mutation = `#graphql
     mutation metafieldsSetVariant($metafields: [MetafieldsSetInput!]!) {
       metafieldsSet(metafields: $metafields) {
@@ -315,7 +348,7 @@ async function setQtyOldValue(adminHeaders, variantId, newQty) {
   };
 
   const resp = await fetch(
-    "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
+    `https://${shopDomain}/admin/api/2024-10/graphql.json`,
     {
       method: "POST",
       headers: {
@@ -341,12 +374,12 @@ async function setQtyOldValue(adminHeaders, variantId, newQty) {
  * 4) DETERMINE IF THIS ITEM IS MASTER OR CHILD
  * ------------------------------------------------------------------
  */
-async function getMasterChildInfo(adminHeaders, inventoryItemId) {
-  console.log(`🔍 getMasterChildInfo => itemId ${inventoryItemId}`);
+async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
+  console.log(`🔍 getMasterChildInfo => inventory item: ${inventoryItemId}`);
 
-  // 1) find the variant for this inventory item
+  // 1) Find the variant associated with this inventory item
   const response = await fetch(
-    "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
+    `https://${shopDomain}/admin/api/2024-10/graphql.json`,
     {
       method: "POST",
       headers: {
@@ -387,7 +420,7 @@ async function getMasterChildInfo(adminHeaders, inventoryItemId) {
   const data = await response.json();
   const variantNode = data?.data?.inventoryItem?.variant;
   if (!variantNode) {
-    console.log("❌ No variant => no MASTER/CHILD found.");
+    console.log("❌ No variant was found; no MASTER/CHILD relationship detected.");
     return null;
   }
 
@@ -398,7 +431,7 @@ async function getMasterChildInfo(adminHeaders, inventoryItemId) {
   const isMaster = masterField?.node?.value?.trim().toLowerCase() === "true";
 
   if (isMaster) {
-    console.log("✅ This variant is a MASTER.");
+    console.log("✅ This variant is designated as MASTER.");
     const childrenKey = metafields.find(
       (m) => m.node.namespace === "projektstocksyncchildren" && m.node.key === "childrenkey"
     );
@@ -407,7 +440,7 @@ async function getMasterChildInfo(adminHeaders, inventoryItemId) {
       try {
         childrenIds = JSON.parse(childrenKey.node.value);
       } catch (err) {
-        console.error("❌ childrenkey parse error =>", err);
+        console.error("❌ Error parsing 'childrenkey' =>", err);
       }
     }
     return {
@@ -418,8 +451,8 @@ async function getMasterChildInfo(adminHeaders, inventoryItemId) {
     };
   }
 
-  // not master => see if it's child
-  console.log("🔎 Searching storewide for a MASTER referencing this item as CHILD...");
+  // If not MASTER, check if it's a CHILD
+  console.log("🔎 Searching the store for a MASTER referencing this item as a CHILD...");
   let hasNextPage = true;
   let cursor = null;
 
@@ -459,7 +492,7 @@ async function getMasterChildInfo(adminHeaders, inventoryItemId) {
       }
     `;
     const resp = await fetch(
-      "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
+      `https://${shopDomain}/admin/api/2024-10/graphql.json`,
       {
         method: "POST",
         headers: {
@@ -479,22 +512,26 @@ async function getMasterChildInfo(adminHeaders, inventoryItemId) {
         const masterFlag = pmfs.find(
           (m) => m.node.namespace === "projektstocksyncmaster" && m.node.key === "master"
         );
-        const isMasterVariant = masterFlag?.node?.value?.trim().toLowerCase() === "true";
+        const isMasterVariant =
+          masterFlag?.node?.value?.trim().toLowerCase() === "true";
         if (!isMasterVariant) continue;
 
         const childrenKey = pmfs.find(
-          (m) => m.node.namespace === "projektstocksyncchildren" && m.node.key === "childrenkey"
+          (m) =>
+            m.node.namespace === "projektstocksyncchildren" && m.node.key === "childrenkey"
         );
         let childArr = [];
         if (childrenKey?.node?.value) {
           try {
             childArr = JSON.parse(childrenKey.node.value);
           } catch (err) {
-            console.error("❌ childrenkey parse error =>", err);
+            console.error("❌ Error parsing 'childrenkey' =>", err);
           }
         }
         if (childArr.includes(variantNode.id)) {
-          console.log(`✅ Found CHILD => MASTER:${possibleMaster.id}, CHILD:${variantNode.id}`);
+          console.log(
+            `✅ Identified CHILD => MASTER: ${possibleMaster.id}, CHILD: ${variantNode.id}`
+          );
           return {
             isChild: true,
             childVariantId: variantNode.id,
@@ -512,7 +549,7 @@ async function getMasterChildInfo(adminHeaders, inventoryItemId) {
     cursor = allData.data?.products?.pageInfo?.endCursor;
   }
 
-  console.log("❌ No MASTER referencing => not a CHILD either.");
+  console.log("❌ No referencing MASTER found; thus, this is not a CHILD either.");
   return null;
 }
 
@@ -521,7 +558,7 @@ async function getMasterChildInfo(adminHeaders, inventoryItemId) {
  * 4.1) GET THE "qtymanagement" (CHILD DIVISOR)
  * ------------------------------------------------------------------
  */
-async function getVariantQtyManagement(adminHeaders, variantId) {
+async function getVariantQtyManagement(shopDomain, adminHeaders, variantId) {
   const query = `
     query GetVariantQtyManagement($variantId: ID!) {
       productVariant(id: $variantId) {
@@ -532,7 +569,7 @@ async function getVariantQtyManagement(adminHeaders, variantId) {
     }
   `;
   const resp = await fetch(
-    "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
+    `https://${shopDomain}/admin/api/2024-10/graphql.json`,
     {
       method: "POST",
       headers: {
@@ -551,10 +588,8 @@ async function getVariantQtyManagement(adminHeaders, variantId) {
  * ------------------------------------------------------------------
  * 4.2) GET CHILDREN (inventoryItemId) OF A MASTER
  * ------------------------------------------------------------------
- * Now includes a fallback query for missing child variants that
- * might exist in other products.
  */
-async function getChildrenInventoryItems(adminHeaders, masterVariantId) {
+async function getChildrenInventoryItems(shopDomain, adminHeaders, masterVariantId) {
   const query = `
     query GetProductVariant($variantId: ID!) {
       productVariant(id: $variantId) {
@@ -578,7 +613,7 @@ async function getChildrenInventoryItems(adminHeaders, masterVariantId) {
     }
   `;
   const resp = await fetch(
-    "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
+    `https://${shopDomain}/admin/api/2024-10/graphql.json`,
     {
       method: "POST",
       headers: {
@@ -604,21 +639,21 @@ async function getChildrenInventoryItems(adminHeaders, masterVariantId) {
   let childIds = [];
   if (variant.metafield?.value) {
     try {
-      childIds = JSON.parse(variant.metafield.value); // e.g. ["gid://shopify/ProductVariant/XXX", ...]
+      childIds = JSON.parse(variant.metafield.value);
     } catch (err) {
-      console.error("❌ childrenkey parse error =>", err);
+      console.error("❌ Error parsing 'childrenkey' =>", err);
       return [];
     }
   }
 
-  // normalise
+  // Normalise
   const normChildIds = childIds.map((cid) =>
     cid.startsWith("gid://shopify/ProductVariant/")
       ? cid.replace("gid://shopify/ProductVariant/", "")
       : cid
   );
 
-  // 1) Try to find them in the MASTER's product
+  // 1) Attempt to locate them within the MASTER's product
   const productEdges = variant.product?.variants?.edges || [];
   let foundChildren = [];
   let missingIds = [];
@@ -628,7 +663,7 @@ async function getChildrenInventoryItems(adminHeaders, masterVariantId) {
       (e) => e.node.id.replace("gid://shopify/ProductVariant/", "") === cid
     );
     if (!childEdge) {
-      console.warn(`⚠️ Child not found in the same product => ${cid}`);
+      console.warn(`⚠️ Child not found within the same product => ${cid}`);
       missingIds.push(cid);
     } else {
       foundChildren.push({
@@ -640,7 +675,7 @@ async function getChildrenInventoryItems(adminHeaders, masterVariantId) {
 
   // 2) Fallback query for missing IDs
   if (missingIds.length > 0) {
-    console.log(`🔎 Attempting fallback fetch for missing variant IDs =>`, missingIds);
+    console.log(`🔎 Attempting a fallback fetch for missing variant IDs =>`, missingIds);
     const fallbackQuery = `
       query GetMissingVariants($variantIds: [ID!]!) {
         nodes(ids: $variantIds) {
@@ -654,7 +689,7 @@ async function getChildrenInventoryItems(adminHeaders, masterVariantId) {
       }
     `;
     const fallResp = await fetch(
-      "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
+      `https://${shopDomain}/admin/api/2024-10/graphql.json`,
       {
         method: "POST",
         headers: {
@@ -701,7 +736,7 @@ async function processWithDeferred(key, initialUpdate, processUpdate) {
   if (updateLocks.has(key)) {
     const lock = updateLocks.get(key);
     lock.pending = initialUpdate;
-    console.log(`Lock active => deferring new update for key ${key}`);
+    console.log(`Lock is active => deferring new update for key: ${key}`);
     return;
   }
   updateLocks.set(key, { pending: null });
@@ -726,7 +761,7 @@ async function processWithDeferred(key, initialUpdate, processUpdate) {
  * 6) GET CURRENT "available" QTY
  * ------------------------------------------------------------------
  */
-async function getCurrentAvailableQuantity(adminHeaders, inventoryItemId, locationId) {
+async function getCurrentAvailableQuantity(shopDomain, adminHeaders, inventoryItemId, locationId) {
   async function doQuery(iid, locId) {
     const query = `
       query getInventoryLevels($inventoryItemId: ID!) {
@@ -749,7 +784,7 @@ async function getCurrentAvailableQuantity(adminHeaders, inventoryItemId, locati
       }
     `;
     const resp = await fetch(
-      "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
+      `https://${shopDomain}/admin/api/2024-10/graphql.json`,
       {
         method: "POST",
         headers: {
@@ -783,10 +818,10 @@ async function getCurrentAvailableQuantity(adminHeaders, inventoryItemId, locati
   let qty = await doQuery(finalId, locationId);
   if (qty !== null) return qty;
 
-  console.log(`⚠️ Not found => activating => ${finalId}, loc:${locationId}`);
+  console.log(`⚠️ This item or location was not found => attempting activation => ${finalId}, loc:${locationId}`);
   const numericId = finalId.replace("gid://shopify/InventoryItem/", "");
   try {
-    await activateInventoryItem(adminHeaders, numericId, locationId);
+    await activateInventoryItem(shopDomain, adminHeaders, numericId, locationId);
   } catch (err) {
     console.warn("⚠️ Activation failed =>", err.message);
     return 0;
@@ -804,7 +839,7 @@ async function getCurrentAvailableQuantity(adminHeaders, inventoryItemId, locati
  * HELPER => GET INVENTORY ITEM ID FROM A VARIANT ID
  * ------------------------------------------------------------------
  */
-async function getInventoryItemIdFromVariantId(adminHeaders, variantId) {
+async function getInventoryItemIdFromVariantId(shopDomain, adminHeaders, variantId) {
   const query = `
     query GetVariantItem($id: ID!) {
       productVariant(id: $id) {
@@ -818,7 +853,7 @@ async function getInventoryItemIdFromVariantId(adminHeaders, variantId) {
   const variables = { id: variantId };
 
   const resp = await fetch(
-    "https://projekt-agency-apps.myshopify.com/admin/api/2024-10/graphql.json",
+    `https://${shopDomain}/admin/api/2024-10/graphql.json`,
     {
       method: "POST",
       headers: {
@@ -832,7 +867,7 @@ async function getInventoryItemIdFromVariantId(adminHeaders, variantId) {
   const data = await resp.json();
   const itemId = data?.data?.productVariant?.inventoryItem?.id;
   if (!itemId) {
-    console.warn(`No inventoryItem found => variantId: ${variantId}`);
+    console.warn(`No inventoryItem found for variantId: ${variantId}`);
     return null;
   }
   return itemId.replace("gid://shopify/InventoryItem/", "");
@@ -849,7 +884,6 @@ function addEventToAggregator(comboKey, event) {
   if (aggregatorMap.has(comboKey)) {
     const aggregator = aggregatorMap.get(comboKey);
     aggregator.events.push(event);
-    // optionally reset the timer or keep it the same
   } else {
     const aggregator = { events: [event], timer: null };
     aggregatorMap.set(comboKey, aggregator);
@@ -872,19 +906,19 @@ async function processAggregatorEvents(comboKey) {
     `⌛ Listening window closed => combo:${comboKey}, total events: ${events.length}`
   );
 
-  // We'll pick the last event per child + (optionally) 1 master event
+  // We'll pick the last event for each child + possibly one master event
   const finalChildMap = new Map();
   let finalMaster = null;
 
   for (const ev of events) {
     if (ev.isMaster) {
-      finalMaster = ev; // overwrite if multiple MASTER updates
+      finalMaster = ev; // Overwrite if multiple MASTER updates occurred
     } else {
-      finalChildMap.set(ev.childVariantId, ev); // overwrite if multiple child updates
+      finalChildMap.set(ev.childVariantId, ev); // Overwrite if multiple CHILD updates
     }
   }
 
-  // process child events first
+  // Process child events first
   for (const [childVarId, ev] of finalChildMap) {
     try {
       await handleChildEvent(ev);
@@ -893,7 +927,7 @@ async function processAggregatorEvents(comboKey) {
     }
   }
 
-  // then master
+  // Then the master
   if (finalMaster) {
     try {
       await handleMasterEvent(finalMaster);
@@ -902,25 +936,32 @@ async function processAggregatorEvents(comboKey) {
     }
   }
 
-  console.log(`✅ aggregator processing complete => combo:${comboKey}`);
+  console.log(`✅ Aggregator processing complete => combo:${comboKey}`);
 }
 
 /**
- * Child => difference-based => newMaster = masterOld + (childDiff * childDivisor)
- * then recalc siblings => if childDivisor=1 => child=MASTER exactly
+ * CHILD => difference-based => newMaster = masterOld + (childDiff * childDivisor)
+ * Then recalc siblings => if childDivisor=1 => child's qty = MASTER exactly
  */
 async function handleChildEvent(ev) {
   console.log(
     `handleChildEvent => childVariant:${ev.childVariantId}, oldQty:${ev.oldQty}, newQty:${ev.newQty}`
   );
+  const { shopDomain, adminHeaders } = ev;
+
   const childDiff = ev.newQty - ev.oldQty;
 
-  // fetch childDivisor
-  const childDivisor = await getVariantQtyManagement(ev.adminHeaders, ev.childVariantId);
+  // Fetch childDivisor
+  const childDivisor = await getVariantQtyManagement(shopDomain, adminHeaders, ev.childVariantId);
   console.log(`childDivisor => ${childDivisor}`);
 
-  // get MASTER's old
-  const masterOldQty = await getCurrentAvailableQuantity(ev.adminHeaders, ev.masterInventoryItemId, ev.locationId);
+  // Retrieve MASTER's old quantity
+  const masterOldQty = await getCurrentAvailableQuantity(
+    shopDomain,
+    adminHeaders,
+    ev.masterInventoryItemId,
+    ev.locationId
+  );
   console.log(`masterOldQty => ${masterOldQty}`);
 
   // new MASTER => masterOldQty + (childDiff * childDivisor)
@@ -928,19 +969,36 @@ async function handleChildEvent(ev) {
   const newMasterQty = masterOldQty + scaledDiff;
   console.log(`newMasterQty => ${newMasterQty}`);
 
-  // 1) update the child in Shopify
-  await setInventoryQuantity(ev.adminHeaders, ev.inventoryItemId, ev.locationId, ev.newQty);
+  // 1) Update the CHILD's quantity in Shopify
+  await setInventoryQuantity(
+    shopDomain,
+    adminHeaders,
+    ev.inventoryItemId,
+    ev.locationId,
+    ev.newQty
+  );
 
-  // 2) if MASTER changed
+  // 2) If MASTER's qty has changed
   if (newMasterQty !== masterOldQty) {
-    await setInventoryQuantity(ev.adminHeaders, ev.masterInventoryItemId, ev.locationId, newMasterQty, true);
+    await setInventoryQuantity(
+      shopDomain,
+      adminHeaders,
+      ev.masterInventoryItemId,
+      ev.locationId,
+      newMasterQty,
+      true
+    );
   }
 
-  // 3) recalc siblings => if childDivisor=1 => child=MASTER
-  const siblings = await getChildrenInventoryItems(ev.adminHeaders, ev.masterVariantId);
-  const finalMasterQty = await getCurrentAvailableQuantity(ev.adminHeaders, ev.masterInventoryItemId, ev.locationId);
+  // 3) Recalculate siblings => if childDivisor=1 => child = MASTER
+  const siblings = await getChildrenInventoryItems(shopDomain, adminHeaders, ev.masterVariantId);
+  const finalMasterQty = await getCurrentAvailableQuantity(
+    shopDomain,
+    adminHeaders,
+    ev.masterInventoryItemId,
+    ev.locationId
+  );
 
-  // track updated
   const updatedVariants = new Set();
   updatedVariants.add(ev.childVariantId);
   if (newMasterQty !== masterOldQty) {
@@ -948,12 +1006,12 @@ async function handleChildEvent(ev) {
   }
 
   for (const s of siblings) {
-    // skip the triggering child
+    // Skip the triggering child
     const sid = s.inventoryItemId.replace("gid://shopify/InventoryItem/", "");
     if (sid === String(ev.inventoryItemId)) {
       continue;
     }
-    const sDivisor = await getVariantQtyManagement(ev.adminHeaders, s.variantId);
+    const sDivisor = await getVariantQtyManagement(shopDomain, adminHeaders, s.variantId);
 
     let newSQty;
     if (sDivisor === 1) {
@@ -963,15 +1021,15 @@ async function handleChildEvent(ev) {
       newSQty = Math.floor(finalMasterQty / (sDivisor || 1));
     }
 
-    const oldSQty = await getCurrentAvailableQuantity(ev.adminHeaders, sid, ev.locationId);
+    const oldSQty = await getCurrentAvailableQuantity(shopDomain, adminHeaders, sid, ev.locationId);
     if (newSQty !== oldSQty) {
       console.log(`Sibling => old:${oldSQty}, new:${newSQty}, divisor:${sDivisor}`);
-      await setInventoryQuantity(ev.adminHeaders, sid, ev.locationId, newSQty, true);
+      await setInventoryQuantity(shopDomain, adminHeaders, sid, ev.locationId, newSQty, true);
       updatedVariants.add(s.variantId);
     }
   }
 
-  // 4) update qtyold for child, MASTER, siblings
+  // 4) Update qtyold for the CHILD, MASTER, and siblings
   for (const vid of updatedVariants) {
     let finalQty = 0;
     if (vid === ev.childVariantId) {
@@ -979,13 +1037,18 @@ async function handleChildEvent(ev) {
     } else if (vid === ev.masterVariantId) {
       finalQty = newMasterQty;
     } else {
-      // sibling => fetch final
-      const siblingInvId = await getInventoryItemIdFromVariantId(ev.adminHeaders, vid);
+      // A sibling => fetch final
+      const siblingInvId = await getInventoryItemIdFromVariantId(shopDomain, adminHeaders, vid);
       if (!siblingInvId) continue;
-      const realQty = await getCurrentAvailableQuantity(ev.adminHeaders, siblingInvId, ev.locationId);
+      const realQty = await getCurrentAvailableQuantity(
+        shopDomain,
+        adminHeaders,
+        siblingInvId,
+        ev.locationId
+      );
       finalQty = realQty;
     }
-    await setQtyOldValue(ev.adminHeaders, vid, finalQty);
+    await setQtyOldValue(shopDomain, adminHeaders, vid, finalQty);
   }
 }
 
@@ -993,47 +1056,57 @@ async function handleChildEvent(ev) {
  * MASTER => recalc children => if childDivisor=1 => child=MASTER, else floor(MASTER / childDivisor)
  */
 async function handleMasterEvent(ev) {
+  const { shopDomain, adminHeaders } = ev;
   console.log(`handleMasterEvent => oldQty:${ev.oldQty}, newQty:${ev.newQty}`);
 
-  // forcibly set MASTER if changed
-  const shopMasterQty = await getCurrentAvailableQuantity(ev.adminHeaders, ev.inventoryItemId, ev.locationId);
+  // Force MASTER quantity if needed
+  const shopMasterQty = await getCurrentAvailableQuantity(
+    shopDomain,
+    adminHeaders,
+    ev.inventoryItemId,
+    ev.locationId
+  );
   if (shopMasterQty !== ev.newQty) {
-    await setInventoryQuantity(ev.adminHeaders, ev.inventoryItemId, ev.locationId, ev.newQty);
+    await setInventoryQuantity(shopDomain, adminHeaders, ev.inventoryItemId, ev.locationId, ev.newQty);
   }
 
-  // recalc children
-  const children = await getChildrenInventoryItems(ev.adminHeaders, ev.variantId);
+  // Recalculate children
+  const children = await getChildrenInventoryItems(shopDomain, adminHeaders, ev.variantId);
   const updatedVariants = new Set();
   updatedVariants.add(ev.variantId);
 
   for (const c of children) {
     const cid = c.inventoryItemId.replace("gid://shopify/InventoryItem/", "");
-    const dv = await getVariantQtyManagement(ev.adminHeaders, c.variantId);
+    const dv = await getVariantQtyManagement(shopDomain, adminHeaders, c.variantId);
 
     let newCQty;
     if (dv === 1) {
-      // child=MASTER
       newCQty = ev.newQty;
     } else {
       newCQty = Math.floor(ev.newQty / (dv || 1));
     }
 
-    const oldCQty = await getCurrentAvailableQuantity(ev.adminHeaders, cid, ev.locationId);
+    const oldCQty = await getCurrentAvailableQuantity(shopDomain, adminHeaders, cid, ev.locationId);
     if (newCQty !== oldCQty) {
-      await setInventoryQuantity(ev.adminHeaders, cid, ev.locationId, newCQty, true);
+      await setInventoryQuantity(shopDomain, adminHeaders, cid, ev.locationId, newCQty, true);
       updatedVariants.add(c.variantId);
     }
   }
 
-  // update 'qtyold' for MASTER + changed children
+  // Update 'qtyold' for MASTER + changed children
   for (const vId of updatedVariants) {
     if (vId === ev.variantId) {
-      await setQtyOldValue(ev.adminHeaders, vId, ev.newQty);
+      await setQtyOldValue(shopDomain, adminHeaders, vId, ev.newQty);
     } else {
-      const childInvId = await getInventoryItemIdFromVariantId(ev.adminHeaders, vId);
+      const childInvId = await getInventoryItemIdFromVariantId(shopDomain, adminHeaders, vId);
       if (!childInvId) continue;
-      const realChildQty = await getCurrentAvailableQuantity(ev.adminHeaders, childInvId, ev.locationId);
-      await setQtyOldValue(ev.adminHeaders, vId, realChildQty);
+      const realChildQty = await getCurrentAvailableQuantity(
+        shopDomain,
+        adminHeaders,
+        childInvId,
+        ev.locationId
+      );
+      await setQtyOldValue(shopDomain, adminHeaders, vId, realChildQty);
     }
   }
 }
@@ -1046,12 +1119,12 @@ async function handleMasterEvent(ev) {
 export const action = async ({ request }) => {
   console.log("🔔 Inventory Webhook => aggregator + difference-based + childDivisor=1 logic.");
 
-  // 1) parse raw body
+  // 1) Parse raw body
   const rawBody = await request.text();
   const payload = JSON.parse(rawBody);
   console.log("Webhook payload:", payload);
 
-  // 2) verify HMAC
+  // 2) Verify HMAC
   const secret = process.env.SHOPIFY_API_SECRET;
   const hmacHeader = request.headers.get("X-Shopify-Hmac-Sha256");
   if (!secret || !hmacHeader) {
@@ -1065,7 +1138,7 @@ export const action = async ({ request }) => {
   }
   console.log("✅ HMAC verified successfully.");
 
-  // 3) short-term dedup => 10s
+  // 3) Short-term dedup => 10s
   const dedupKey = buildExactDedupKey(payload);
   if (hasExactKey(dedupKey)) {
     console.log(`Skipping repeated => ${dedupKey}`);
@@ -1073,7 +1146,7 @@ export const action = async ({ request }) => {
   }
   markExactKey(dedupKey);
 
-  // 4) predicted updates => skip
+  // 4) Predicted updates => skip
   const pKey = buildPredictedKey(payload.inventory_item_id, payload.location_id, payload.available);
   if (hasPredictedUpdate(pKey)) {
     console.log(`Skipping => predicted future update => ${pKey}`);
@@ -1088,31 +1161,39 @@ export const action = async ({ request }) => {
   }
   markComboKey(shortComboKey);
 
-  // 6) admin auth
-  let adminHeaders;
-  try {
-    const token = process.env.SHOPIFY_ACCESS_TOKEN;
-    if (!token) throw new Error("Missing SHOPIFY_ACCESS_TOKEN");
-    adminHeaders = { "X-Shopify-Access-Token": token };
-    console.log("Admin client auth => success.");
-  } catch (err) {
-    console.error("Auth error =>", err);
-    return new Response("Authentication failed", { status: 403 });
+  // 6) Identify the shop domain from the webhook header
+  const shopDomain = request.headers.get("X-Shopify-Shop-Domain");
+  if (!shopDomain) {
+    console.error("No X-Shopify-Shop-Domain header => cannot retrieve tokens");
+    return new Response("Shop domain missing", { status: 400 });
   }
 
-  // 7) Identify if MASTER or CHILD
+  // 7) Retrieve admin headers from the DB
+  let adminHeaders, adminApiUrl;
+  try {
+    const result = await getShopSessionHeaders(shopDomain);
+    adminHeaders = result.adminHeaders;
+    adminApiUrl = result.adminApiUrl;
+    console.log(`Admin client auth => success for shop: ${shopDomain}`);
+  } catch (err) {
+    console.error("Auth error =>", err);
+    return new Response("Authentication (DB) failed", { status: 403 });
+  }
+
+  // 8) MAIN LOGIC
   const locationId = payload.location_id;
   const inventoryItemId = payload.inventory_item_id;
   const newQty = payload.available;
 
-  const info = await getMasterChildInfo(adminHeaders, inventoryItemId);
+  // Determine if this item is MASTER or CHILD
+  const info = await getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId);
   if (!info) {
-    console.log("No MASTER/CHILD => normal update, no difference-based logic needed.");
-    await setInventoryQuantity(adminHeaders, inventoryItemId, locationId, newQty);
-    return new Response("No Master/Child => updated only", { status: 200 });
+    console.log("No MASTER/CHILD relationship found; performing a standard update without difference-based logic.");
+    await setInventoryQuantity(shopDomain, adminHeaders, inventoryItemId, locationId, newQty);
+    return new Response("No Master/Child => performed a direct update", { status: 200 });
   }
 
-  // read oldQty from qtyold
+  // Read oldQty from the 'qtyold' metafield
   let variantId;
   let isMaster = false;
 
@@ -1123,11 +1204,11 @@ export const action = async ({ request }) => {
     isMaster = false;
     variantId = info.childVariantId;
   }
-  const oldQty = await getQtyOldValue(adminHeaders, variantId);
+  const oldQty = await getQtyOldValue(shopDomain, adminHeaders, variantId);
   console.log(`(qtyold) => old:${oldQty}, new:${newQty}`);
 
   // aggregator key => for MASTER => (masterInventoryItemId + locationId)
-  // for CHILD => also (masterInventoryItemId + locationId)
+  // for CHILD => (masterInventoryItemId + locationId) as well
   let comboKey;
   if (info.isMaster) {
     comboKey = `${info.inventoryItemId}-${locationId}`;
@@ -1135,11 +1216,12 @@ export const action = async ({ request }) => {
     comboKey = `${info.masterInventoryItemId}-${locationId}`;
   }
 
-  // build the event object
+  // Build the event object
   const eventObj = {
+    shopDomain,
+    adminHeaders,
     isMaster,
     locationId,
-    adminHeaders,
     newQty,
     oldQty,
   };
@@ -1155,7 +1237,7 @@ export const action = async ({ request }) => {
     eventObj.inventoryItemId = info.inventoryItemId;
   }
 
-  // 8) aggregator => short queue
+  // 9) Pass this to the aggregator => short queue
   addEventToAggregator(comboKey, eventObj);
 
   return new Response("Event queued => waiting for aggregator to finalise", { status: 200 });
