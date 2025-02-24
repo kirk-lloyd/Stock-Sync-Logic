@@ -10,15 +10,10 @@ export default function Layout({ children }) {
     return (
         <div>
             <header>
-                <nav>
-                    <Link to="/">Home</Link>
-                    <Link to="/products">Products</Link>
-                    <Link to="/settings">Settings</Link>
-                </nav>
             </header>
             <main>{children}</main>
             <footer>
-                <p>© {new Date().getFullYear()} Stock Sync Logic</p>
+                <p style={{ display: "flex", justifyContent: "center", margin: "1rem 0" }}>© {new Date().getFullYear()} Stock Sync Logic</p>
             </footer>
         </div>
     );

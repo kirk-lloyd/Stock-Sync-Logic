@@ -24,7 +24,6 @@ export default function App() {
         </Link>
         <Link to="/app/products">Products</Link>
         <Link to="/app/master">Master Products</Link>
-        <Link to="/app/sync">Test Friday</Link>
         <Link to="/app/help">Help</Link>
       </NavMenu>
       <Outlet />
