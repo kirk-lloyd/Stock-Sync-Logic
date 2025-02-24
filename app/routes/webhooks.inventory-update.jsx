@@ -1,6 +1,6 @@
 import { json } from "@remix-run/node";
 import crypto from "crypto";
-import prisma from "../db.server.js"; // Adjust the import path based on your project structure
+import prisma from "../db.server.js"; // Adjust if your structure differs
 
 /**
  * ------------------------------------------------------------------
@@ -11,8 +11,10 @@ import prisma from "../db.server.js"; // Adjust the import path based on your pr
  * 1) A short "listening window" aggregator (5s). Any near-simultaneous
  *    updates for the same MASTER combo get batched, preventing collisions.
  *
- * 2) "qtyold" metafield logic for difference-based updates. For CHILD changes,
- *    we do newMaster = (masterOldQty + (childDiff * childDivisor)).
+ * 2) "qtyold" logic, but now stored in our Prisma database as the
+ *    authoritative source for oldQty retrieval. We still update the
+ *    Shopify metafield for reference, but we do not read from it
+ *    at the start of the webhook.
  *
  * 3) childDivisor=1 logic. If a child's qtymanagement = 1, the CHILD's
  *    quantity always matches the MASTER exactly, rather than dividing
@@ -116,7 +118,6 @@ async function getShopSessionHeaders(shopDomain) {
     throw new Error(`No session or accessToken found for shop: ${shopDomain}`);
   }
 
-  // Return the token assigned to that specific shop
   return {
     adminHeaders: {
       "X-Shopify-Access-Token": session.accessToken,
@@ -283,10 +284,15 @@ async function setInventoryQuantity(
 
 /*
  * ------------------------------------------------------------------
- * 3.1) GET/SET QTYOLD METAFIELD
+ * 3.1) (Kept) GET/SET QTYOLD METAFIELD ON SHOPIFY FOR REFERENCE
  * ------------------------------------------------------------------
+ * We are no longer reading from the Shopify metafield to retrieve oldQty.
+ * Instead, we read/write oldQty from our Prisma database. We do, however,
+ * still update this metafield to keep a secondary record inside Shopify.
  */
 async function getQtyOldValue(shopDomain, adminHeaders, variantId) {
+  // NOTE: We will no longer call this at the start for the oldQty read,
+  // but we keep it here if you still need it for debugging or transitions.
   const query = `
     query GetQtyOld($id: ID!) {
       productVariant(id: $id) {
@@ -318,7 +324,8 @@ async function getQtyOldValue(shopDomain, adminHeaders, variantId) {
 }
 
 async function setQtyOldValue(shopDomain, adminHeaders, variantId, newQty) {
-  const mutation = `#graphql
+  // This still updates the Shopify metafield so you can see oldQty in the store
+  const mutation = `
     mutation metafieldsSetVariant($metafields: [MetafieldsSetInput!]!) {
       metafieldsSet(metafields: $metafields) {
         metafields {
@@ -367,6 +374,88 @@ async function setQtyOldValue(shopDomain, adminHeaders, variantId, newQty) {
     console.log(`✅ Updated 'qtyold' => new value: ${newQty} for variant: ${variantId}`);
   }
   return data;
+}
+
+/*
+ * ------------------------------------------------------------------
+ * 3.2) (NEW) GET/SET QTYOLD FROM PRISMA DATABASE
+ * ------------------------------------------------------------------
+ * We now retrieve the oldQty from our DB and save it back after
+ * we've made our calculations. This ensures multi-tenant isolation
+ * by scoping queries to the shopDomain.
+ */
+
+// Helper to strip the "gid://shopify/ProductVariant/" prefix
+function normaliseVariantId(variantId) {
+  if (!variantId) return null;
+  return variantId.replace("gid://shopify/ProductVariant/", "");
+}
+
+// Retrieve oldQty from your DB for this shop + variant
+async function getQtyOldValueDB(shopDomain, variantId) {
+  // 'variantId' here is the 'gid://...' string or a raw ID; we normalise
+  const normalisedId = normaliseVariantId(variantId);
+
+  /**
+   * You’ll want to have an `oldQuantity` column in your Prisma schema.
+   * For example, if you're using the `Stockdb` model, add a column:
+   *
+   *  model Stockdb {
+   *    id               Int      @id @default(autoincrement())
+   *    title            String
+   *    shop             String
+   *    productId        String
+   *    productHandle    String
+   *    productVariantId String
+   *    oldQuantity      Int      @default(0)    // <--- new column
+   *  }
+   *
+   * Then run your migration. We do a simple findFirst + default = 0 if not found.
+   */
+  const record = await prisma.stockdb.findFirst({
+    where: {
+      shop: shopDomain,
+      productVariantId: normalisedId,
+    },
+  });
+
+  if (!record) {
+    console.log(`No record found for shop:${shopDomain}, variant:${normalisedId}, returning oldQty=0`);
+    return 0;
+  }
+
+  // You may also want to ensure record.oldQuantity is always an integer
+  return record.oldQuantity ?? 0;
+}
+
+// Store oldQty back into the DB
+async function setQtyOldValueDB(shopDomain, variantId, newQty) {
+  const normalisedId = normaliseVariantId(variantId);
+
+  // We'll upsert in case there's no existing record
+  await prisma.stockdb.upsert({
+    where: {
+      // This object key is typically "shop_productVariantId" or 
+      // "shop_productVariantId_composite" depending on how Prisma 
+      // auto-generates the field name. 
+      // Usually it's the combination of the columns joined by underscores:
+      shop_productVariantId: {
+        shop: shopDomain,
+        productVariantId: normalisedId,
+      },
+    },
+    update: { oldQuantity: newQty },
+    create: { 
+      shop: shopDomain, 
+      productVariantId: normalisedId, 
+      oldQuantity: newQty,
+      title: "Unknown",
+      productId: "unknown",
+      productHandle: "unknown",
+    },
+  });
+
+  console.log(`✅ Updated DB 'oldQuantity' => new value: ${newQty} for variant (shop:${shopDomain}): ${normalisedId}`);
 }
 
 /*
@@ -1029,7 +1118,7 @@ async function handleChildEvent(ev) {
     }
   }
 
-  // 4) Update qtyold for the CHILD, MASTER, and siblings
+  // 4) Update qtyold (both in DB and the Shopify metafield) for the CHILD, MASTER, and siblings
   for (const vid of updatedVariants) {
     let finalQty = 0;
     if (vid === ev.childVariantId) {
@@ -1048,6 +1137,11 @@ async function handleChildEvent(ev) {
       );
       finalQty = realQty;
     }
+
+    // Write new oldQty to the DB
+    await setQtyOldValueDB(shopDomain, vid, finalQty);
+
+    // Also update the metafield (for reference only)
     await setQtyOldValue(shopDomain, adminHeaders, vid, finalQty);
   }
 }
@@ -1093,9 +1187,10 @@ async function handleMasterEvent(ev) {
     }
   }
 
-  // Update 'qtyold' for MASTER + changed children
+  // Update 'qtyold' in DB + metafield for MASTER + changed children
   for (const vId of updatedVariants) {
     if (vId === ev.variantId) {
+      await setQtyOldValueDB(shopDomain, vId, ev.newQty);
       await setQtyOldValue(shopDomain, adminHeaders, vId, ev.newQty);
     } else {
       const childInvId = await getInventoryItemIdFromVariantId(shopDomain, adminHeaders, vId);
@@ -1106,6 +1201,7 @@ async function handleMasterEvent(ev) {
         childInvId,
         ev.locationId
       );
+      await setQtyOldValueDB(shopDomain, vId, realChildQty);
       await setQtyOldValue(shopDomain, adminHeaders, vId, realChildQty);
     }
   }
@@ -1189,11 +1285,52 @@ export const action = async ({ request }) => {
   const info = await getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId);
   if (!info) {
     console.log("No MASTER/CHILD relationship found; performing a standard update without difference-based logic.");
+
+    // If no relationship, just do a direct update
     await setInventoryQuantity(shopDomain, adminHeaders, inventoryItemId, locationId, newQty);
+
+    // Also store the new qty as oldQty in the DB (for the next event),
+    // but we have no variantId from getMasterChildInfo => fallback logic:
+    // We'll attempt to find the variant ID from inventoryItem => variant
+    // purely to keep DB in sync.
+    // If that fails, we simply skip storing in DB.
+    const fallbackVariantId = await fetch(
+      `https://${shopDomain}/admin/api/2024-10/graphql.json`,
+      {
+        method: "POST",
+        headers: {
+          ...adminHeaders,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          query: `
+          query getVariantByInventory($inventoryItemId: ID!) {
+            inventoryItem(id: $inventoryItemId) {
+              variant {
+                id
+              }
+            }
+          }`,
+          variables: { inventoryItemId: `gid://shopify/InventoryItem/${inventoryItemId}` },
+        }),
+      }
+    )
+      .then((res) => res.json())
+      .then((resData) => resData?.data?.inventoryItem?.variant?.id)
+      .catch(() => null);
+
+    if (fallbackVariantId) {
+      await setQtyOldValueDB(shopDomain, fallbackVariantId, newQty);
+      await setQtyOldValue(shopDomain, adminHeaders, fallbackVariantId, newQty);
+    } else {
+      console.log("Could not determine variantId for direct update, skipping DB 'oldQty' storage.");
+    }
+
     return new Response("No Master/Child => performed a direct update", { status: 200 });
   }
 
-  // Read oldQty from the 'qtyold' metafield
+  // Instead of calling getQtyOldValue(...) from Shopify,
+  // we retrieve the oldQty from our DB:
   let variantId;
   let isMaster = false;
 
@@ -1204,8 +1341,10 @@ export const action = async ({ request }) => {
     isMaster = false;
     variantId = info.childVariantId;
   }
-  const oldQty = await getQtyOldValue(shopDomain, adminHeaders, variantId);
-  console.log(`(qtyold) => old:${oldQty}, new:${newQty}`);
+  // NEW: read oldQty from Prisma, NOT from the metafield
+  const oldQty = await getQtyOldValueDB(shopDomain, variantId);
+
+  console.log(`(DB-based oldQty) => old:${oldQty}, new:${newQty}`);
 
   // aggregator key => for MASTER => (masterInventoryItemId + locationId)
   // for CHILD => (masterInventoryItemId + locationId) as well

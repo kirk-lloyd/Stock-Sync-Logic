@@ -29,7 +29,7 @@ import { TitleBar } from "@shopify/app-bridge-react";
 /**
  * parseVariantId:
  * Extracts the numeric part from a Shopify GID string.
- * For example, "gid://shopify/ProductVariant/12345" returns "12345".
+ * E.g., "gid://shopify/ProductVariant/12345" returns "12345".
  */
 function parseVariantId(gid = "") {
   return gid.split("/").pop();
@@ -37,9 +37,11 @@ function parseVariantId(gid = "") {
 
 /**
  * Loader function:
- * Authenticates with Shopify and retrieves products along with their variants and associated metafields.
- * It identifies master variants and collects child variant IDs, then queries for additional details of the child variants,
- * including the quantity management metafield.
+ * Authenticates with Shopify and retrieves products along with their variants and metafields.
+ * For each product, it determines which variants are "master" variants and parses their
+ * childrenMetafield to obtain an array of child variant IDs.
+ * Then it fetches additional details for each unique child variant and attaches those
+ * details to their corresponding master variant.
  */
 export const loader = async ({ request }) => {
   console.log("Loader start: Authenticating and retrieving products…");
@@ -108,7 +110,7 @@ export const loader = async ({ request }) => {
     const rawProducts =
       data?.data?.products?.edges?.map((edge) => edge.node) || [];
 
-    // Identify master variants and collect child variant IDs.
+    // For each product, determine which variants are masters and extract child IDs.
     let allChildVariantIds = [];
     const productsParsed = rawProducts.map((product) => {
       const updatedVariants = product.variants.edges.map((vEdge) => {
@@ -134,7 +136,7 @@ export const loader = async ({ request }) => {
       };
     });
 
-    // Fetch additional data for child variants (including quantity management metafield).
+    // Fetch additional data for all unique child variant IDs.
     const uniqueChildIds = [...new Set(allChildVariantIds)];
     let childVariantMap = {};
     if (uniqueChildIds.length > 0) {
@@ -201,12 +203,16 @@ export const loader = async ({ request }) => {
 
 /**
  * ProductsTable Component:
- * Renders a table of products and their variants with a search bar inside the Card.
- * The search bar filters products by title.
- * Table pagination is applied at the product level (10 items per page) using a table-style pagination.
- * Clicking a product row expands the nested rows.
- * Clicking a master variant toggles the display of its nested child variant rows.
- * Master variant rows include actions to manage children and edit inventory.
+ * Renders a table of products and their variants.
+ *
+ * - A search bar inside the Card filters products by title.
+ * - Table pagination displays 10 products per page.
+ * - Clicking a product row toggles its expansion.
+ * - Each product (parent row) is rendered with rowType="data".
+ * - For each product, its variants are rendered as nested rows (rowType="child").
+ * - For master variants, clicking the row toggles the display of its nested child rows.
+ * - When a master variant is expanded, its background remains active via a custom CSS class.
+ * - Inventory and children management modals are provided.
  */
 export default function ProductsTable() {
   if (typeof window === "undefined") return null;
@@ -214,25 +220,45 @@ export default function ProductsTable() {
   const { products: initialProducts } = useLoaderData();
   const revalidator = useRevalidator();
 
-  // Primary state for products.
+  // Add custom CSS to force active background color
+  // This style ensures that rows with the "activeRow" class have the desired background colour.
+  // The !important flag is used to override any Polaris defaults.
+  useEffect(() => {
+    const style = document.createElement("style");
+    style.innerHTML = `
+      .activeRow {
+        background-color: #cceeff !important;
+      }
+    `;
+    document.head.appendChild(style);
+    return () => {
+      document.head.removeChild(style);
+    };
+  }, []);
+
+  // State for products.
   const [products, setProducts] = useState(initialProducts);
   useEffect(() => setProducts(initialProducts), [initialProducts]);
 
-  // State for search, sorting, and pagination.
+  // State for search, sorting and pagination.
   const [query, setQuery] = useState("");
   const [sortValue, setSortValue] = useState("title");
   const [sortDirection, setSortDirection] = useState("ascending");
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
 
-  // State for expanded rows.
+  // State for row expansion.
   const [expandedProductIndex, setExpandedProductIndex] = useState(-1);
-  // Expanded master variants (IDs) to control nested children display
+  // For master variants: store IDs of expanded rows to maintain active background.
   const [expandedMasters, setExpandedMasters] = useState([]);
+
+  // State for modals and selected product/variant.
   const [modalActive, setModalActive] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [selectedVariant, setSelectedVariant] = useState(null);
   const [childrenModalActive, setChildrenModalActive] = useState(false);
+
+  // State for inventory, variants reference and toast notifications.
   const [inventory, setInventory] = useState({});
   const [allVariants, setAllVariants] = useState([]);
   const [childrenSelection, setChildrenSelection] = useState([]);
@@ -240,12 +266,12 @@ export default function ProductsTable() {
   const [toastMessage, setToastMessage] = useState("");
   const [qtyManagementValues, setQtyManagementValues] = useState({});
 
-  // State for the children management modal search and pagination.
+  // State for children management modal search and pagination.
   const [childrenQuery, setChildrenQuery] = useState("");
   const [childrenCurrentPage, setChildrenCurrentPage] = useState(1);
   const childrenItemsPerPage = 5;
 
-  // Compute pagination indexes.
+  // Compute pagination indexes based on filtered products.
   const totalProducts = products
     .filter((product) =>
       product.title.toLowerCase().includes(query.toLowerCase())
@@ -254,7 +280,7 @@ export default function ProductsTable() {
   const startIndex = (currentPage - 1) * itemsPerPage + 1;
   const endIndex = Math.min(totalProducts, currentPage * itemsPerPage);
 
-  // Build a flattened list of all variants.
+  // Build a flattened list of all variants (used in modals, etc.).
   useEffect(() => {
     const variantsList = [];
     products.forEach((prod) => {
@@ -269,7 +295,7 @@ export default function ProductsTable() {
     setAllVariants(variantsList);
   }, [products]);
 
-  // Compute filtered, sorted, and paginated products.
+  // Filter, sort and paginate products.
   const filteredProducts = products.filter((product) =>
     product.title.toLowerCase().includes(query.toLowerCase())
   );
@@ -285,19 +311,19 @@ export default function ProductsTable() {
     currentPage * itemsPerPage
   );
 
-  // Handle sorting when clicking a header.
+  // Handler for sorting when a header is clicked.
   const handleSort = useCallback((newSortValue, newSortDirection) => {
     setSortValue(newSortValue);
     setSortDirection(newSortDirection);
   }, []);
 
-  // Toggle product row expansion.
+  // Toggle expansion for a product row (parent row).
   const toggleExpanded = useCallback(
     (index) => () => setExpandedProductIndex((prev) => (prev === index ? -1 : index)),
     []
   );
 
-  // Toggle master variant expansion to show/hide child rows.
+  // Toggle expansion for a master variant row to show/hide nested child rows.
   const toggleMasterVariant = (variantId) => {
     setExpandedMasters((prev) =>
       prev.includes(variantId)
@@ -306,7 +332,7 @@ export default function ProductsTable() {
     );
   };
 
-  // Helper: returns the master variant for a given child variant.
+  // Helper function to find the master variant for a given child variant.
   function findMasterOfVariant(variantId) {
     for (const prod of products) {
       for (const ve of prod.variants.edges) {
@@ -323,19 +349,20 @@ export default function ProductsTable() {
     return null;
   }
 
-  // Determines whether a variant's checkbox should be disabled.
+  // Check if a variant's checkbox should be disabled (e.g. if it's already assigned elsewhere).
   const isVariantAssignedElsewhere = (variant, currentProductId) => {
     const found = findMasterOfVariant(variant.id);
     return found && found.masterProductId !== currentProductId;
   };
 
-  // For the children modal checkboxes, disable if the variant is already assigned elsewhere.
+  // For children modal checkboxes, disable if the variant is already assigned elsewhere.
   const isChildVariantAssignedElsewhere = (variant) => {
     if (!selectedProduct) return false;
     const found = findMasterOfVariant(variant.id);
     return found && found.masterProductId !== selectedProduct.id;
   };
 
+  // Toast notification helpers.
   function showToast(message) {
     setToastMessage(message);
     setToastActive(true);
@@ -345,7 +372,7 @@ export default function ProductsTable() {
     setToastMessage("");
   }
 
-  // INVENTORY MODAL FUNCTIONS
+  // Open the inventory modal for a given master variant.
   function openMasterInventoryModal(product, masterVariant) {
     setSelectedProduct(product);
     setSelectedVariant(masterVariant);
@@ -353,10 +380,11 @@ export default function ProductsTable() {
     setModalActive(true);
   }
 
-  // CHILDREN MANAGEMENT MODAL FUNCTIONS
+  // Toggle the children management modal.
   function toggleChildrenModal() {
     setChildrenModalActive((prev) => !prev);
   }
+  // Open the children management modal for a master variant.
   function openChildrenModal(product, variant) {
     if (!variant.isMaster) {
       showToast("Cannot manage children: this variant is not designated as Master.");
@@ -365,11 +393,12 @@ export default function ProductsTable() {
     setSelectedProduct(product);
     setSelectedVariant(variant);
     setChildrenSelection(variant.childVariantIds || []);
-    // Reset the modal search and pagination state.
+    // Reset modal search and pagination.
     setChildrenQuery("");
     setChildrenCurrentPage(1);
     toggleChildrenModal();
   }
+  // Toggle selection for a child variant in the modal.
   function handleToggleChildSelection(variantGid) {
     setChildrenSelection((prev) =>
       prev.includes(variantGid)
@@ -377,6 +406,7 @@ export default function ProductsTable() {
         : [...prev, variantGid]
     );
   }
+  // Save children assignments.
   function handleSaveChildren() {
     if (!selectedVariant) return;
     const invalidChildren = [];
@@ -406,6 +436,7 @@ export default function ProductsTable() {
     toggleChildrenModal();
   }
 
+  // Update master metafield on the server.
   async function updateMasterMetafield(variantId, isMaster) {
     try {
       const response = await fetch("/api/update-variant-metafield", {
@@ -425,6 +456,7 @@ export default function ProductsTable() {
     }
   }
 
+  // Handler for master checkbox changes.
   async function handleMasterCheckboxChange(productId, variantId, newChecked) {
     if (newChecked) {
       const foundMaster = findMasterOfVariant(variantId);
@@ -459,6 +491,7 @@ export default function ProductsTable() {
       await updateMasterMetafield(variantId, newChecked);
     } catch (error) {
       console.error("Failed to update master metafield on server:", error);
+      // Revert state change on error.
       setProducts((prev) =>
         prev.map((prod) => {
           if (prod.id !== productId) return prod;
@@ -484,6 +517,7 @@ export default function ProductsTable() {
     }
   }
 
+  // Update children metafield on the server.
   async function handleAddChildren(variantId, newChildren) {
     if (!variantId) return;
     try {
@@ -525,10 +559,12 @@ export default function ProductsTable() {
     }
   }
 
+  // Handle inventory changes.
   function handleInventoryChange(variantId, newQuantity) {
     setInventory((prev) => ({ ...prev, [variantId]: newQuantity }));
   }
 
+  // Update inventory on the server.
   async function updateInventory() {
     if (!selectedProduct || !selectedVariant) return;
     try {
@@ -557,6 +593,7 @@ export default function ProductsTable() {
     }
   }
 
+  // Update quantity management metafield.
   async function updateQtyManagement(variantId, newQty) {
     try {
       const response = await fetch("/api/update-variant-metafield", {
@@ -577,7 +614,16 @@ export default function ProductsTable() {
     }
   }
 
-  // Determines the status and corresponding row background colour.
+  /**
+   * getVariantStatus:
+   * Determines the status of a variant (Master, Child, or Unassigned) and returns an object
+   * containing the status label and background colour.
+   *
+   * For master variants:
+   * - The default background is dark (#333333).
+   * - If the master variant is expanded (i.e. its ID is in expandedMasters), it receives the active background (#cceeff).
+   * For child variants, a pale orange background (#fff4e5) is used.
+   */
   function getVariantStatus(variant) {
     let status = "";
     if (variant.isMaster) {
@@ -588,10 +634,18 @@ export default function ProductsTable() {
       status = "Unassigned";
     }
 
-    let bgColour = "#ffffff"; // Default for unassigned.
-    if (status === "Master") bgColour = "#333333"; // Dark background for master.
-    else if (status === "Child") bgColour = "#fff4e5"; // Pale orange for child.
-
+    // Set default background colour for unassigned.
+    let bgColour = "#ffffff";
+    if (status === "Master") {
+      // Default dark for master.
+      bgColour = "#333333";
+      // If this master variant is expanded, override with active color.
+      if (expandedMasters.includes(variant.id)) {
+        bgColour = "#cceeff";
+      }
+    } else if (status === "Child") {
+      bgColour = "#fff4e5";
+    }
     return { status, bgColour };
   }
 
@@ -610,7 +664,7 @@ export default function ProductsTable() {
   
         {/* Card wrapping the search bar and table */}
         <Card padding="0">
-          {/* Search bar with padding, left icon and clear button */}
+          {/* Search bar with padding, left search icon and clear button */}
           <Box paddingBlock="6" paddingInline="6" marginBottom="10">
             <TextField
               label=""
@@ -656,9 +710,8 @@ export default function ProductsTable() {
             selectable={false}
           >
             {paginatedProducts.map((product, productIndex) => {
+              // Parent product row.
               const isProductExpanded = expandedProductIndex === productIndex;
-  
-              // Parent row for the product
               const productRowMarkup = (
                 <IndexTable.Row
                   rowType="data"
@@ -676,21 +729,24 @@ export default function ProductsTable() {
                   </IndexTable.Cell>
                   <IndexTable.Cell>
                     <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-                      <Tag style={{ display: "inline-block", width: "auto" }}>
-                        {product.variants.edges.length} variants
-                      </Tag>
+                      <div style={{ display: "inline-block", maxWidth: "fit-content", whiteSpace: "nowrap" }}>
+                        <Tag>
+                          {product.variants.edges.length} variants
+                        </Tag>
+                      </div>
                       <Text as="span" variant="headingMd" fontWeight="semibold">
                         {product.title}
                       </Text>
                     </div>
                   </IndexTable.Cell>
-                  <IndexTable.Cell>{/* Status column */}</IndexTable.Cell>
-                  <IndexTable.Cell>{/* Inventory column */}</IndexTable.Cell>
-                  <IndexTable.Cell>{/* Master column */}</IndexTable.Cell>
-                  <IndexTable.Cell>{/* Actions column */}</IndexTable.Cell>
+                  <IndexTable.Cell>{/* Status */}</IndexTable.Cell>
+                  <IndexTable.Cell>{/* Inventory */}</IndexTable.Cell>
+                  <IndexTable.Cell>{/* Master */}</IndexTable.Cell>
+                  <IndexTable.Cell>{/* Actions */}</IndexTable.Cell>
                 </IndexTable.Row>
               );
   
+              // For expanded products, render nested variant rows.
               let variantSubRows = null;
               if (isProductExpanded) {
                 variantSubRows = product.variants.edges.map((variantEdge, variantIndex) => {
@@ -698,7 +754,7 @@ export default function ProductsTable() {
                   const { status, bgColour } = getVariantStatus(variant);
                   const shortVariantId = parseVariantId(variant.id);
   
-                  // Render the master variant row (or normal variant row)
+                  // Master variant row (or regular variant row) as nested row.
                   const variantRow = (
                     <IndexTable.Row
                       rowType="child"
@@ -706,11 +762,11 @@ export default function ProductsTable() {
                       key={variant.id}
                       position={productIndex + 1 + variantIndex}
                       onClick={(e) => {
-                        if (e && typeof e.stopPropagation === "function") {
-                          e.stopPropagation();
-                        }
+                        if (e && typeof e.stopPropagation === "function") e.stopPropagation();
                         if (variant.isMaster) toggleMasterVariant(variant.id);
                       }}
+                      // Add the activeRow class if this master variant is expanded.
+                      className={variant.isMaster && expandedMasters.includes(variant.id) ? "activeRow" : ""}
                       style={{ backgroundColor: bgColour }}
                     >
                       <IndexTable.Cell>
@@ -723,13 +779,17 @@ export default function ProductsTable() {
                       <IndexTable.Cell>
                         <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
                           {variant.isMaster ? (
-                            <Tag status="success" style={{ display: "inline-block", width: "auto" }}>
-                              Variant Master – {shortVariantId}
-                            </Tag>
+                            <div style={{ display: "inline-block", maxWidth: "fit-content", whiteSpace: "nowrap" }}>
+                              <Tag status="success">
+                                Variant Master – {shortVariantId}
+                              </Tag>
+                            </div>
                           ) : (
-                            <Tag status={status === "Child" ? "warning" : "default"} style={{ display: "inline-block", width: "auto" }}>
-                              Variant – {shortVariantId}
-                            </Tag>
+                            <div style={{ display: "inline-block", maxWidth: "fit-content", whiteSpace: "nowrap" }}>
+                              <Tag status={status === "Child" ? "warning" : "default"}>
+                                Variant – {shortVariantId}
+                              </Tag>
+                            </div>
                           )}
                           <Text as="span" variant="headingSm">
                             {variant.title}
@@ -746,9 +806,7 @@ export default function ProductsTable() {
                             Child
                           </Tag>
                         ) : (
-                          <Tag size="small">
-                            Unassigned
-                          </Tag>
+                          <Tag size="small">Unassigned</Tag>
                         )}
                       </IndexTable.Cell>
                       <IndexTable.Cell>
@@ -789,23 +847,25 @@ export default function ProductsTable() {
                     </IndexTable.Row>
                   );
   
-                  // Conditionally render nested child rows only if the master variant is expanded.
+                  // Render nested child variant rows if the master variant is expanded.
                   const childVariantRows =
-                    variant.isMaster && variant.childVariants?.length > 0 && expandedMasters.includes(variant.id)
+                    variant.isMaster &&
+                    variant.childVariants?.length > 0 &&
+                    expandedMasters.includes(variant.id)
                       ? variant.childVariants.map((childVar, childIndex) => {
                           const shortChildId = parseVariantId(childVar.id);
                           const currentQtyValue =
                             qtyManagementValues[childVar.id] !== undefined
                               ? qtyManagementValues[childVar.id]
                               : childVar.qtyManagementMetafield?.value ?? "";
-                          const childBgColour = "#fff4e5";
+                          const childBgColour = "#575757";
                           return (
                             <IndexTable.Row
                               rowType="child"
                               id={`childVar-${childVar.id}`}
                               key={childVar.id}
                               position={productIndex + 2 + variantIndex + childIndex}
-                              style={{ backgroundColor: childBgColour }}
+                              style={{ background: childBgColour }}
                             >
                               <IndexTable.Cell>
                                 <Thumbnail
@@ -816,9 +876,11 @@ export default function ProductsTable() {
                               </IndexTable.Cell>
                               <IndexTable.Cell>
                                 <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-                                  <Tag status="warning" style={{ display: "inline-block", width: "auto" }}>
-                                    Variant – {shortChildId}
-                                  </Tag>
+                                  <div style={{ display: "inline-block", maxWidth: "fit-content", whiteSpace: "nowrap" }}>
+                                    <Tag status="warning">
+                                      Variant – {shortChildId}
+                                    </Tag>
+                                  </div>
                                   <Text as="span" variant="headingSm">
                                     {childVar.product?.title || "Untitled"}
                                   </Text>
@@ -868,6 +930,7 @@ export default function ProductsTable() {
                         })
                       : null;
   
+                  // Return the master variant row and its nested child rows.
                   return (
                     <React.Fragment key={variant.id}>
                       {variantRow}
@@ -914,9 +977,11 @@ export default function ProductsTable() {
               </p>
             </TextContainer>
             <div style={{ marginBottom: "1rem" }}>
-              <Tag style={{ display: "inline-block", width: "auto" }}>
-                Master: {selectedVariant.title}
-              </Tag>
+              <div style={{ display: "inline-block", maxWidth: "fit-content", whiteSpace: "nowrap" }}>
+                <Tag>
+                  Master: {selectedVariant.title}
+                </Tag>
+              </div>
               <p>ID: {parseVariantId(selectedVariant.id)}</p>
               <TextField
                 label="Inventory Quantity"
@@ -995,9 +1060,11 @@ export default function ProductsTable() {
                           onChange={() => handleToggleChildSelection(item.id)}
                         />
                         <div style={{ marginLeft: "1rem" }}>
-                          <Tag style={{ display: "inline-block", width: "auto" }}>
-                            {item.productTitle} – Variant: {item.title}
-                          </Tag>
+                          <div style={{ display: "inline-block", maxWidth: "fit-content", whiteSpace: "nowrap" }}>
+                            <Tag>
+                              {item.productTitle} – Variant: {item.title}
+                            </Tag>
+                          </div>
                           <p>ID: {shortId}</p>
                         </div>
                       </div>

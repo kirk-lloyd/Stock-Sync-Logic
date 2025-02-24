@@ -1,42 +1,51 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// This is your Prisma schema file.
+// Learn more here: https://pris.ly/d/prisma-schema
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DB_URL")
-  shadowDatabaseUrl  = env("DB_SHADOW_URL")
+  provider          = "postgresql"
+  url               = env("DB_URL")
+  shadowDatabaseUrl = env("DB_SHADOW_URL")
 }
 
 model session {
-  id            String   @id @default(uuid()) // 
+  id            String   @id @default(uuid())
   shop          String
   state         String
   isOnline      Boolean
   scope         String
-  expires       DateTime? // 
+  expires       DateTime?
   accessToken   String
-  userId        String?   // 
-  firstName     String?   // 
-  lastName      String?   // 
-  email         String?   // 
+  userId        String?
+  firstName     String?
+  lastName      String?
+  email         String?
   accountOwner  Boolean
-  locale        String?   // 
+  locale        String?
   collaborator  Boolean
   emailVerified Boolean
 }
 
 model Stockdb {
-  id               Int      @id @default(autoincrement())
-  title            String
+  // Remove separate numeric 'id' if you truly want a composite PK:
+  // or keep it if you prefer, but then the real primary key is 'id'
+  // and the composite becomes just a unique constraint. 
+  // For simplicity, let's illustrate a composite PK:
+
   shop             String
-  productId        String
-  productHandle    String
   productVariantId String
+  title            String?
+  productId        String?
+  productHandle    String?
+  oldQuantity      Int      @default(0)
+
+  // Make this pair the primary key
+  @@id([shop, productVariantId])
 }
+
 
 model WebhookEvent {
   id              String   @id @default(uuid())
