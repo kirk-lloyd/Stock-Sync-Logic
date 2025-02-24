@@ -48,71 +48,100 @@ export const loader = async ({ request }) => {
   const { admin } = await authenticate.admin(request);
 
   try {
-    console.log("Authentication successful. Querying product data…");
-    const response = await admin.graphql(
-      `#graphql
-      query GetAllProducts {
-        products(first: 100) {
-          edges {
-            node {
-              id
-              title
-              createdAt
-              images(first: 1) {
-                edges {
-                  node {
-                    originalSrc
-                  }
-                }
-              }
-              metafields(first: 30) {
-                edges {
-                  node {
-                    namespace
-                    key
-                    value
-                  }
-                }
-              }
-              variants(first: 50) {
-                edges {
-                  node {
-                    id
-                    title
-                    inventoryQuantity
-                    image {
-                      id
+    // ================================================
+    // 1) FETCH ALL PRODUCTS USING CURSOR-BASED PAGINATION
+    // ================================================
+    let allProducts = [];
+    let hasNextPage = true;
+    let endCursor = null;
+    const pageSize = 100;
+
+    while (hasNextPage) {
+      // A single "page" of products
+      const productQuery = `
+        query GetAllProducts($pageSize: Int!, $cursor: String) {
+          products(first: $pageSize, after: $cursor) {
+            edges {
+              cursor
+              node {
+                id
+                title
+                createdAt
+                images(first: 1) {
+                  edges {
+                    node {
                       originalSrc
                     }
-                    masterMetafield: metafield(
-                      namespace: "projektstocksyncmaster"
-                      key: "master"
-                    ) {
-                      id
+                  }
+                }
+                metafields(first: 30) {
+                  edges {
+                    node {
+                      namespace
+                      key
                       value
                     }
-                    childrenMetafield: metafield(
-                      namespace: "projektstocksyncchildren"
-                      key: "childrenkey"
-                    ) {
+                  }
+                }
+                variants(first: 100) {
+                  edges {
+                    node {
                       id
-                      value
+                      title
+                      inventoryQuantity
+                      image {
+                        id
+                        originalSrc
+                      }
+                      masterMetafield: metafield(
+                        namespace: "projektstocksyncmaster"
+                        key: "master"
+                      ) {
+                        id
+                        value
+                      }
+                      childrenMetafield: metafield(
+                        namespace: "projektstocksyncchildren"
+                        key: "childrenkey"
+                      ) {
+                        id
+                        value
+                      }
                     }
                   }
                 }
               }
             }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
           }
         }
-      }`
-    );
-    const data = await response.json();
-    const rawProducts =
-      data?.data?.products?.edges?.map((edge) => edge.node) || [];
+      `;
 
-    // For each product, determine which variants are masters and extract child IDs.
+      const response = await admin.graphql(productQuery, {
+        variables: {
+          pageSize,
+          cursor: endCursor,
+        },
+      });
+      const data = await response.json();
+
+      // Collect this "page" of products
+      const edges = data?.data?.products?.edges ?? [];
+      edges.forEach((edge) => allProducts.push(edge.node));
+
+      // Check for next page
+      hasNextPage = data?.data?.products?.pageInfo?.hasNextPage || false;
+      endCursor = data?.data?.products?.pageInfo?.endCursor || null;
+    }
+
+    // ================================================
+    // 2) POST-PROCESS PRODUCTS: DETERMINE MASTERS & CHILDREN
+    // ================================================
     let allChildVariantIds = [];
-    const productsParsed = rawProducts.map((product) => {
+    const productsParsed = allProducts.map((product) => {
       const updatedVariants = product.variants.edges.map((vEdge) => {
         const variant = vEdge.node;
         const isMaster = variant.masterMetafield?.value === "true";
@@ -136,7 +165,9 @@ export const loader = async ({ request }) => {
       };
     });
 
-    // Fetch additional data for all unique child variant IDs.
+    // ================================================
+    // 3) FETCH CHILD VARIANTS (IF ANY)
+    // ================================================
     const uniqueChildIds = [...new Set(allChildVariantIds)];
     let childVariantMap = {};
     if (uniqueChildIds.length > 0) {
@@ -178,11 +209,15 @@ export const loader = async ({ request }) => {
       const childData = await childResponse.json();
       const childNodes = childData?.data?.nodes || [];
       childNodes.forEach((childVariant) => {
-        if (childVariant?.id) childVariantMap[childVariant.id] = childVariant;
+        if (childVariant?.id) {
+          childVariantMap[childVariant.id] = childVariant;
+        }
       });
     }
 
-    // Attach fetched child variant data to each master variant.
+    // ================================================
+    // 4) ATTACH CHILD VARIANTS TO THEIR MASTERS
+    // ================================================
     const finalProducts = productsParsed.map((product) => {
       const newEdges = product.variants.edges.map((edge) => {
         const variant = edge.node;
@@ -206,7 +241,7 @@ export const loader = async ({ request }) => {
  * Renders a table of products and their variants.
  *
  * - A search bar inside the Card filters products by title.
- * - Table pagination displays 10 products per page.
+ * - Table pagination displays 20 products per page.
  * - Clicking a product row toggles its expansion.
  * - Each product (parent row) is rendered with rowType="data".
  * - For each product, its variants are rendered as nested rows (rowType="child").
@@ -227,7 +262,7 @@ export default function ProductsTable() {
     const style = document.createElement("style");
     style.innerHTML = `
       .activeRow {
-        background-color: #cceeff !important;
+        background-color:rgb(173, 173, 173) !important;
       }
     `;
     document.head.appendChild(style);
@@ -245,7 +280,7 @@ export default function ProductsTable() {
   const [sortValue, setSortValue] = useState("title");
   const [sortDirection, setSortDirection] = useState("ascending");
   const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 10;
+  const itemsPerPage = 20;
 
   // State for row expansion.
   const [expandedProductIndex, setExpandedProductIndex] = useState(-1);
@@ -665,7 +700,7 @@ export default function ProductsTable() {
         {/* Card wrapping the search bar and table */}
         <Card padding="0">
           {/* Search bar with padding, left search icon and clear button */}
-          <Box paddingBlock="6" paddingInline="6" marginBottom="10">
+          <Box paddingBlock="300" paddingInline="300" marginBottom="10">
             <TextField
               label=""
               placeholder="Search by product title"
