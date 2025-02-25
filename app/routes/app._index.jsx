@@ -118,12 +118,17 @@ export default function Index() {
       </Helmet>
       {/* Title bar with a button to create a new master (this button still triggers the POST action) */}
       <TitleBar title="Synchronize your inventory">
-        <button variant="primary" url="/app/products/">
-          Manage all products 📦 
-        </button> 
-        <button variant="secundary" onClick={() => fetcher.submit({}, { method: "POST" })}>
-          Master List 👑
-        </button>
+        {/*<button
+            variant="primary"
+            onClick={() => window.location.href = '/app/products/'}
+          >
+            Manage all products 📦
+          </button>
+          <button
+            onClick={() => window.location.href = '/master/'}
+          >
+            Master List 👑
+          </button>*/}
       </TitleBar>
       <BlockStack gap="500">
         <Layout>
