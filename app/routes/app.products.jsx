@@ -746,12 +746,17 @@ export default function ProductsTable() {
         </Helmet>
         {/* Title bar with action buttons */}
         <TitleBar title="All your products">
-          <button variant="primary" url="/app/products/">
+          {/*<button
+            variant="primary"
+            onClick={() => window.location.href = '/app/products/'}
+          >
             Manage all products 📦
           </button>
-          <button variant="secondary" onClick={() => fetcher.submit({}, { method: "POST" })}>
+          <button
+            onClick={() => window.location.href = '/master/'}
+          >
             Master List 👑
-          </button>
+          </button>*/}
         </TitleBar>
 
         {/* Card wrapping the search bar and table */}

@@ -767,12 +767,17 @@ export default function ProductsTable() {
         </Helmet>
         {/* Title bar with action buttons */}
         <TitleBar title="Master Products">
-          <button variant="primary" url="app/products/">
+          {/*<button
+            variant="primary"
+            onClick={() => window.location.href = '/app/products/'}
+          >
             Manage all products 📦
           </button>
-          <button variant="secondary" ourl="app/master/">
+          <button
+            onClick={() => window.location.href = '/master/'}
+          >
             Master List 👑
-          </button>
+          </button>*/}
         </TitleBar>
 
         {/* Card wrapping the search bar and table */}

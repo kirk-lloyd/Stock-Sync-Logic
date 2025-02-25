@@ -20,17 +20,19 @@ export default function AdditionalPage() {
         <script src="https://cdn.botpress.cloud/webchat/v2.3/inject.js"></script>
         <script src="https://files.bpcontent.cloud/2025/02/24/22/20250224223007-YAA5E131.js"></script>
       </Helmet>
-      <TitleBar title="Help">
-        <button variant="primary" url="/app/products/">
-          Manage all products 📦 
-        </button>
-        <button
-          variant="secondary"
-          onClick={() => fetcher.submit({}, { method: "POST" })}
-        >
-          Master List 👑
-        </button>
-      </TitleBar>
+        <TitleBar title="Help">
+          {/*<button
+            variant="primary"
+            onClick={() => window.location.href = '/app/products/'}
+          >
+            Manage all products 📦
+          </button>
+          <button
+            onClick={() => window.location.href = '/master/'}
+          >
+            Master List 👑
+          </button>*/}
+        </TitleBar>
       <Layout>
         <Layout.Section>
           <BlockStack gap="500">
