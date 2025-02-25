@@ -25,11 +25,12 @@ import { useLoaderData, useRevalidator } from "@remix-run/react";
 import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import { TitleBar } from "@shopify/app-bridge-react";
+import { Helmet } from "react-helmet";
 
 /**
  * parseVariantId:
- * Extracts the numeric portion from a Shopify GID string.
- * For instance, "gid://shopify/ProductVariant/12345" will return "12345".
+ * Extracts the numeric part from a Shopify GID string.
+ * E.g., "gid://shopify/ProductVariant/12345" returns "12345".
  */
 function parseVariantId(gid = "") {
   return gid.split("/").pop();
@@ -37,89 +38,118 @@ function parseVariantId(gid = "") {
 
 /**
  * Loader function:
- * Authenticates with Shopify, retrieves all products and their variants, then determines
- * which variants are designated as 'master'. It also fetches additional details
- * for child variants and attaches those details to their relevant master variants.
+ * Authenticates with Shopify and retrieves products along with their variants and metafields.
+ * For each product, it determines which variants are "master" variants and parses their
+ * childrenMetafield to obtain an array of child variant IDs.
+ * Then it fetches additional details for each unique child variant and attaches those
+ * details to their corresponding master variant.
  *
- * In this modified version, we only return products that actually have at least one
- * master variant. Moreover, each product returned will only contain those variants
- * with 'isMaster' set to true (i.e. `masterMetafield?.value === "true"`).
+ * -- CHANGE APPLIED BELOW --
+ * After constructing `finalProducts`, we now filter it so that only products containing
+ * at least one variant with `masterMetafield.value === "true"` are returned.
  */
 export const loader = async ({ request }) => {
   console.log("Loader start: Authenticating and retrieving products…");
   const { admin } = await authenticate.admin(request);
 
   try {
-    console.log("Authentication successful. Querying product data…");
-    const response = await admin.graphql(
-      `#graphql
-      query GetAllProducts {
-        products(first: 100) {
-          edges {
-            node {
-              id
-              title
-              createdAt
-              images(first: 1) {
-                edges {
-                  node {
-                    originalSrc
-                  }
-                }
-              }
-              metafields(first: 30) {
-                edges {
-                  node {
-                    namespace
-                    key
-                    value
-                  }
-                }
-              }
-              variants(first: 50) {
-                edges {
-                  node {
-                    id
-                    title
-                    inventoryQuantity
-                    image {
-                      id
+    // ================================================
+    // 1) FETCH ALL PRODUCTS USING CURSOR-BASED PAGINATION
+    // ================================================
+    let allProducts = [];
+    let hasNextPage = true;
+    let endCursor = null;
+    const pageSize = 100;
+
+    while (hasNextPage) {
+      // A single "page" of products
+      const productQuery = `
+        query GetAllProducts($pageSize: Int!, $cursor: String) {
+          products(first: $pageSize, after: $cursor) {
+            edges {
+              cursor
+              node {
+                id
+                title
+                createdAt
+                images(first: 1) {
+                  edges {
+                    node {
                       originalSrc
                     }
-                    masterMetafield: metafield(
-                      namespace: "projektstocksyncmaster"
-                      key: "master"
-                    ) {
-                      id
+                  }
+                }
+                metafields(first: 30) {
+                  edges {
+                    node {
+                      namespace
+                      key
                       value
                     }
-                    childrenMetafield: metafield(
-                      namespace: "projektstocksyncchildren"
-                      key: "childrenkey"
-                    ) {
+                  }
+                }
+                variants(first: 100) {
+                  edges {
+                    node {
                       id
-                      value
+                      title
+                      inventoryQuantity
+                      image {
+                        id
+                        originalSrc
+                      }
+                      masterMetafield: metafield(
+                        namespace: "projektstocksyncmaster"
+                        key: "master"
+                      ) {
+                        id
+                        value
+                      }
+                      childrenMetafield: metafield(
+                        namespace: "projektstocksyncchildren"
+                        key: "childrenkey"
+                      ) {
+                        id
+                        value
+                      }
                     }
                   }
                 }
               }
             }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
           }
         }
-      }`
-    );
-    const data = await response.json();
-    const rawProducts =
-      data?.data?.products?.edges?.map((edge) => edge.node) || [];
+      `;
 
-    // Build an augmented list of products, marking variants as master if appropriate
-    // and extracting child variant IDs for each master variant.
+      const response = await admin.graphql(productQuery, {
+        variables: {
+          pageSize,
+          cursor: endCursor,
+        },
+      });
+      const data = await response.json();
+
+      // Collect this "page" of products
+      const edges = data?.data?.products?.edges ?? [];
+      edges.forEach((edge) => allProducts.push(edge.node));
+
+      // Check for next page
+      hasNextPage = data?.data?.products?.pageInfo?.hasNextPage || false;
+      endCursor = data?.data?.products?.pageInfo?.endCursor || null;
+    }
+
+    // ================================================
+    // 2) POST-PROCESS PRODUCTS: DETERMINE MASTERS & CHILDREN
+    // ================================================
     let allChildVariantIds = [];
-    const productsParsed = rawProducts.map((product) => {
+    const productsParsed = allProducts.map((product) => {
       const updatedVariants = product.variants.edges.map((vEdge) => {
         const variant = vEdge.node;
         const isMaster = variant.masterMetafield?.value === "true";
-
         let childVariantIds = [];
         if (isMaster && variant.childrenMetafield?.value) {
           try {
@@ -132,7 +162,6 @@ export const loader = async ({ request }) => {
           }
         }
         allChildVariantIds.push(...childVariantIds);
-
         return { ...variant, isMaster, childVariantIds };
       });
       return {
@@ -141,7 +170,9 @@ export const loader = async ({ request }) => {
       };
     });
 
-    // Fetch data for all unique child variant IDs, then map them by ID for easy reference.
+    // ================================================
+    // 3) FETCH CHILD VARIANTS (IF ANY)
+    // ================================================
     const uniqueChildIds = [...new Set(allChildVariantIds)];
     let childVariantMap = {};
     if (uniqueChildIds.length > 0) {
@@ -189,8 +220,10 @@ export const loader = async ({ request }) => {
       });
     }
 
-    // Attach fetched child variant data to their master variants.
-    const finalProducts = productsParsed.map((product) => {
+    // ================================================
+    // 4) ATTACH CHILD VARIANTS TO THEIR MASTERS
+    // ================================================
+    const productsWithChildren = productsParsed.map((product) => {
       const newEdges = product.variants.edges.map((edge) => {
         const variant = edge.node;
         const resolvedChildren = variant.childVariantIds
@@ -201,24 +234,19 @@ export const loader = async ({ request }) => {
       return { ...product, variants: { edges: newEdges } };
     });
 
-    /**
-     * Only return products that have at least one master variant.
-     * For each product, we also filter out any variants that aren't master.
-     */
-    const onlyMasterProducts = finalProducts
-      .map((p) => {
-        const masterVariantEdges = p.variants.edges.filter((ve) => ve.node.isMaster);
-        if (masterVariantEdges.length > 0) {
-          return {
-            ...p,
-            variants: { edges: masterVariantEdges },
-          };
-        }
-        return null;
-      })
-      .filter(Boolean);
+    // ======================================================
+    // 5) FILTER PRODUCTS TO ONLY INCLUDE ONES WITH A MASTER
+    // ======================================================
+    /* 
+      In this final step, we only keep products that contain 
+      at least one variant whose `isMaster` property is true.
+      This ensures that only master-containing products are displayed.
+    */
+    const finalProducts = productsWithChildren.filter((product) =>
+      product.variants.edges.some((edge) => edge.node.isMaster)
+    );
 
-    return json({ products: onlyMasterProducts });
+    return json({ products: finalProducts });
   } catch (error) {
     console.error("Loader error:", error);
     return json({ products: [], error: error.message }, { status: 500 });
@@ -226,33 +254,34 @@ export const loader = async ({ request }) => {
 };
 
 /**
- * ProductsTable component:
- * Renders a table of products that have master variants only, along with those
- * master variants and their child variants (if any). This includes the following:
+ * ProductsTable Component:
+ * Renders a table of products and their variants.
  *
- * - A search bar to filter products by their title.
- * - Pagination that displays up to 10 products per page.
- * - Expandable product rows to reveal the variant rows.
- * - Within each master variant row, an additional expansion can show its child variants.
- * - Facilities to manage child assignments and master variant inventory.
- * - Toast notifications for feedback on important actions.
- *
- * This version exclusively displays master variants for each product (where
- * `masterMetafield?.value === "true"`).
+ * - A search bar inside the Card filters products by title.
+ * - Table pagination displays 20 products per page.
+ * - Clicking a product row toggles its expansion.
+ * - Each product (parent row) is rendered with rowType="data".
+ * - For each product, its variants are rendered as nested rows (rowType="child").
+ * - For master variants, clicking the row toggles the display of its nested child rows.
+ * - When a master variant is expanded, its background remains active via a custom CSS class.
+ * - Inventory and children management modals are provided.
  */
 export default function ProductsTable() {
-  // Prevent rendering on the server side.
   if (typeof window === "undefined") return null;
 
   const { products: initialProducts } = useLoaderData();
   const revalidator = useRevalidator();
 
-  // Include custom CSS to ensure our 'activeRow' style is honoured.
+  // Add custom CSS to force active background color
   useEffect(() => {
     const style = document.createElement("style");
     style.innerHTML = `
       .activeRow {
-        background-color: #cceeff !important;
+        background-color: rgb(173, 173, 173) !important;
+      }
+      .black-toast .Polaris-Toast {
+        background-color: black !important;
+        color: white !important;
       }
     `;
     document.head.appendChild(style);
@@ -261,40 +290,34 @@ export default function ProductsTable() {
     };
   }, []);
 
-  // State for products and their variations.
+  // State for products.
   const [products, setProducts] = useState(initialProducts);
   useEffect(() => setProducts(initialProducts), [initialProducts]);
 
-  // State for searching, sorting, and pagination.
+  // State for search, sorting and pagination.
   const [query, setQuery] = useState("");
   const [sortValue, setSortValue] = useState("title");
   const [sortDirection, setSortDirection] = useState("ascending");
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 20;
 
-  // State for expansion of product rows.
+  // State for row expansion.
   const [expandedProductIndex, setExpandedProductIndex] = useState(-1);
-  // For master variants: track which are expanded so we can toggle their background.
-  const [expandedMasters, setExpandedMasters] = useState([]);
+  const [expandedMasters, setExpandedMasters] = useState([]); // track expanded master variants
 
-  // State for modals and selected product or variant contexts.
+  // State for modals and selected product/variant.
   const [modalActive, setModalActive] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [selectedVariant, setSelectedVariant] = useState(null);
   const [childrenModalActive, setChildrenModalActive] = useState(false);
 
-  // State for inventory adjustments.
+  // State for inventory, all variants, child checkboxes, toast notifications.
   const [inventory, setInventory] = useState({});
-  // Flattened list of all variants, useful for searching and child assignments.
   const [allVariants, setAllVariants] = useState([]);
-  // State for children selection in the child assignment modal.
   const [childrenSelection, setChildrenSelection] = useState([]);
-
-  // State for toast notifications.
   const [toastActive, setToastActive] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
-
-  // State for child variant quantity management.
+  const [toastType, setToastType] = useState("error"); // "error" o "black"
   const [qtyManagementValues, setQtyManagementValues] = useState({});
 
   // State for children modal search and pagination.
@@ -302,15 +325,14 @@ export default function ProductsTable() {
   const [childrenCurrentPage, setChildrenCurrentPage] = useState(1);
   const childrenItemsPerPage = 5;
 
-  // Compute filtered total for pagination.
-  const totalProducts = products
-    .filter((product) =>
-      product.title.toLowerCase().includes(query.toLowerCase())
-    ).length;
+  // Compute pagination indexes based on filtered products.
+  const totalProducts = products.filter((product) =>
+    product.title.toLowerCase().includes(query.toLowerCase())
+  ).length;
   const startIndex = (currentPage - 1) * itemsPerPage + 1;
   const endIndex = Math.min(totalProducts, currentPage * itemsPerPage);
 
-  // Build a list of all variants (from all products) to assist with child management.
+  // Build a flattened list of all variants (used in modals, etc.).
   useEffect(() => {
     const variantsList = [];
     products.forEach((prod) => {
@@ -325,7 +347,7 @@ export default function ProductsTable() {
     setAllVariants(variantsList);
   }, [products]);
 
-  // Filter, sort, and paginate the product array.
+  // Filter, sort and paginate products.
   const filteredProducts = products.filter((product) =>
     product.title.toLowerCase().includes(query.toLowerCase())
   );
@@ -341,21 +363,19 @@ export default function ProductsTable() {
     currentPage * itemsPerPage
   );
 
-  // Sorting callback.
+  // Handler for sorting when a header is clicked.
   const handleSort = useCallback((newSortValue, newSortDirection) => {
     setSortValue(newSortValue);
     setSortDirection(newSortDirection);
   }, []);
 
-  // Toggle expansion for a product row.
+  // Toggle expansion for a product row (parent row).
   const toggleExpanded = useCallback(
-    (index) => () => {
-      setExpandedProductIndex((prev) => (prev === index ? -1 : index));
-    },
+    (index) => () => setExpandedProductIndex((prev) => (prev === index ? -1 : index)),
     []
   );
 
-  // Toggle the expansion for a master variant row, revealing its child variants.
+  // Toggle expansion for a master variant row to show/hide nested child rows.
   const toggleMasterVariant = (variantId) => {
     setExpandedMasters((prev) =>
       prev.includes(variantId)
@@ -364,7 +384,7 @@ export default function ProductsTable() {
     );
   };
 
-  // Helper to identify which master variant, if any, a given child belongs to.
+  // Helper function to find the master variant for a given child variant.
   function findMasterOfVariant(variantId) {
     for (const prod of products) {
       for (const ve of prod.variants.edges) {
@@ -381,15 +401,13 @@ export default function ProductsTable() {
     return null;
   }
 
-  // Determine if a variant's master checkbox should be disabled
-  // because it's already assigned as a child to some other master.
+  // Check if a variant's checkbox should be disabled (e.g. if it's already assigned elsewhere).
   const isVariantAssignedElsewhere = (variant, currentProductId) => {
     const found = findMasterOfVariant(variant.id);
     return found && found.masterProductId !== currentProductId;
   };
 
-  // A separate check for the child assignment modal, ensuring a variant
-  // isn't assigned to another master.
+  // For children modal checkboxes, disable if the variant is already assigned elsewhere.
   const isChildVariantAssignedElsewhere = (variant) => {
     if (!selectedProduct) return false;
     const found = findMasterOfVariant(variant.id);
@@ -397,8 +415,9 @@ export default function ProductsTable() {
   };
 
   // Toast notification helpers.
-  function showToast(message) {
+  function showToast(message, type = "error") {
     setToastMessage(message);
+    setToastType(type);
     setToastActive(true);
   }
   function onDismissToast() {
@@ -414,12 +433,12 @@ export default function ProductsTable() {
     setModalActive(true);
   }
 
-  // Toggle the child assignment modal on or off.
+  // Toggle the children management modal.
   function toggleChildrenModal() {
     setChildrenModalActive((prev) => !prev);
   }
 
-  // Open the child assignment modal, provided we have a valid master variant.
+  // Open the children management modal for a master variant.
   function openChildrenModal(product, variant) {
     if (!variant.isMaster) {
       showToast("Cannot manage children: this variant is not designated as Master.");
@@ -428,12 +447,13 @@ export default function ProductsTable() {
     setSelectedProduct(product);
     setSelectedVariant(variant);
     setChildrenSelection(variant.childVariantIds || []);
+    // Reset modal search and pagination.
     setChildrenQuery("");
     setChildrenCurrentPage(1);
     toggleChildrenModal();
   }
 
-  // Toggle a child's selection in the child assignment modal.
+  // Toggle selection for a child variant in the modal.
   function handleToggleChildSelection(variantGid) {
     setChildrenSelection((prev) =>
       prev.includes(variantGid)
@@ -442,16 +462,36 @@ export default function ProductsTable() {
     );
   }
 
-  // Save the child assignments for the current master variant.
-  function handleSaveChildren() {
-    if (!selectedVariant) return;
+  // ----------------------------------------------------------------------------------
+  // ADDED HELPER: storeVariantOldQty
+  // This function hits a new backend route (e.g. "/api/update-oldqty") that you'd implement
+  // similarly to your webhook logic (writing to DB and updating the 'qtyold' metafield).
+  // ----------------------------------------------------------------------------------
+  async function storeVariantOldQty(variantId, currentQuantity) {
+    try {
+      await fetch("/api/update-oldqty", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          variantId,
+          newQty: currentQuantity,
+        }),
+      });
+      console.log(
+        `Successfully stored OldQty (${currentQuantity}) for variant ${parseVariantId(variantId)}.`
+      );
+    } catch (err) {
+      console.error("Error storing OldQty in DB:", err);
+    }
+  }
 
-    // Check for invalid child assignments (e.g., child is itself a master or assigned elsewhere).
+  // Save children assignments.
+  async function handleSaveChildren() {
+    if (!selectedVariant) return;
     const invalidChildren = [];
     childrenSelection.forEach((childId) => {
       const childData = allVariants.find((v) => v.id === childId);
       if (!childData) return;
-
       if (childData.isMaster) {
         invalidChildren.push({
           childId,
@@ -459,7 +499,6 @@ export default function ProductsTable() {
         });
         return;
       }
-
       const foundMaster = findMasterOfVariant(childId);
       if (foundMaster && foundMaster.masterVariant.id !== selectedVariant.id) {
         invalidChildren.push({
@@ -468,18 +507,29 @@ export default function ProductsTable() {
         });
       }
     });
-
     if (invalidChildren.length > 0) {
       showToast(`Cannot save children. ${invalidChildren[0].reason}`);
       return;
     }
 
-    // If valid, update the children on the server.
-    handleAddChildren(selectedVariant.id, childrenSelection);
+    // 1) Update the children array in the metafield
+    await handleAddChildren(selectedVariant.id, childrenSelection);
+
+    // --------------------------------------------------------------------------------------
+    // 2) IMMEDIATELY STORE OldQty FOR EACH NEWLY SELECTED CHILD, USING THE CURRENT INVENTORY
+    // --------------------------------------------------------------------------------------
+    for (const childGid of childrenSelection) {
+      const foundVariant = allVariants.find((av) => av.id === childGid);
+      if (foundVariant) {
+        const childInventory = foundVariant.inventoryQuantity ?? 0;
+        await storeVariantOldQty(childGid, childInventory);
+      }
+    }
+
     toggleChildrenModal();
   }
 
-  // Update the 'master' metafield on the server.
+  // Update master metafield on the server.
   async function updateMasterMetafield(variantId, isMaster) {
     try {
       const response = await fetch("/api/update-variant-metafield", {
@@ -492,16 +542,14 @@ export default function ProductsTable() {
           value: isMaster ? "true" : "false",
         }),
       });
-      if (!response.ok) {
-        throw new Error("Failed to update the 'master' metafield");
-      }
+      if (!response.ok) throw new Error("Failed to update the 'master' metafield");
     } catch (error) {
       console.error("Error updating 'master' metafield:", error);
       throw error;
     }
   }
 
-  // Handle the change for a variant's master checkbox in the UI, sending updates to the server.
+  // Handler for master checkbox changes.
   async function handleMasterCheckboxChange(productId, variantId, newChecked) {
     if (newChecked) {
       const foundMaster = findMasterOfVariant(variantId);
@@ -510,6 +558,7 @@ export default function ProductsTable() {
         return;
       }
     }
+    // 1) Immediately update local state so the UI changes
     setProducts((prev) =>
       prev.map((prod) => {
         if (prod.id !== productId) return prod;
@@ -534,11 +583,26 @@ export default function ProductsTable() {
     );
 
     try {
+      // 2) Make the server call to update the master metafield
       await updateMasterMetafield(variantId, newChecked);
+
+      // --------------------------------------------------------------------------------------------------
+      // 3) If newChecked => also store the current inventory as OldQty in your DB, as per your webhook logic
+      // --------------------------------------------------------------------------------------------------
+      if (newChecked) {
+        // Find the variant in local state so we know its inventory quantity
+        const productInState = products.find((p) => p.id === productId);
+        if (productInState) {
+          const variant = productInState.variants.edges.find((ed) => ed.node.id === variantId)?.node;
+          if (variant) {
+            const currentInventory = variant.inventoryQuantity ?? 0;
+            await storeVariantOldQty(variantId, currentInventory);
+          }
+        }
+      }
     } catch (error) {
       console.error("Failed to update master metafield on server:", error);
-
-      // Revert the state if there's an error.
+      // Revert state change on error.
       setProducts((prev) =>
         prev.map((prod) => {
           if (prod.id !== productId) return prod;
@@ -564,7 +628,7 @@ export default function ProductsTable() {
     }
   }
 
-  // Update the 'childrenkey' metafield with the chosen child variants.
+  // Update children metafield on the server.
   async function handleAddChildren(variantId, newChildren) {
     if (!variantId) return;
     try {
@@ -579,7 +643,6 @@ export default function ProductsTable() {
         }),
       });
       if (!response.ok) throw new Error("Failed to update childrenkey");
-      // Update local state.
       setProducts((prev) =>
         prev.map((prod) => {
           const newEdges = prod.variants.edges.map((edge) => {
@@ -607,12 +670,12 @@ export default function ProductsTable() {
     }
   }
 
-  // Local state management for inventory changes.
+  // Handle inventory changes in the modal.
   function handleInventoryChange(variantId, newQuantity) {
     setInventory((prev) => ({ ...prev, [variantId]: newQuantity }));
   }
 
-  // Persist the updated inventory to the server.
+  // Update inventory on the server and revalidate.
   async function updateInventory() {
     if (!selectedProduct || !selectedVariant) return;
     try {
@@ -623,7 +686,7 @@ export default function ProductsTable() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ variantId, newQuantity: Number(qty) }),
       });
-      // Update local state for consistency.
+
       setProducts((prev) =>
         prev.map((prod) => {
           if (prod.id !== selectedProduct.id) return prod;
@@ -642,7 +705,7 @@ export default function ProductsTable() {
     }
   }
 
-  // Update the quantity management metafield on the server for a child variant.
+  // Update quantity management metafield.
   async function updateQtyManagement(variantId, newQty) {
     try {
       const response = await fetch("/api/update-variant-metafield", {
@@ -655,26 +718,23 @@ export default function ProductsTable() {
           value: String(parseInt(newQty, 10)),
         }),
       });
-      if (!response.ok) {
-        throw new Error("Failed to update the qty management metafield");
-      }
-      showToast(`Quantity management updated for variant ${parseVariantId(variantId)}`);
+      if (!response.ok) throw new Error("Failed to update the qty management metafield");
+      showToast(`Master Ratio updated for variant ${parseVariantId(variantId)}`, "black");
     } catch (error) {
       console.error("Error updating qty management metafield:", error);
-      showToast(`Error updating quantity management for variant ${parseVariantId(variantId)}`);
+      showToast(`Error updating Master Ratio for variant ${parseVariantId(variantId)}`);
     }
   }
 
   /**
    * getVariantStatus:
-   * Determines whether a variant is Master, Child, or Unassigned, returning
-   * both a label and a recommended background colour.
+   * Determines the status of a variant (Master, Child, or Unassigned) and returns an object
+   * containing the status label and background colour.
    *
-   * For Master variants:
-   * - The default background is a dark grey (#333333).
-   * - If expanded in the UI (variant ID is in expandedMasters), it uses a light-blue highlight (#cceeff).
-   *
-   * For Child variants, a pale orange background (#fff4e5) is used to differentiate them.
+   * For master variants:
+   * - The default background is dark (#333333).
+   * - If the master variant is expanded (i.e. its ID is in expandedMasters), it receives the active background (#cceeff).
+   * For child variants, a pale orange background (#fff4e5) is used.
    */
   function getVariantStatus(variant) {
     let status = "";
@@ -688,9 +748,9 @@ export default function ProductsTable() {
 
     let bgColour = "#ffffff"; // default for unassigned
     if (status === "Master") {
-      bgColour = "#333333"; // default dark grey for master
+      bgColour = "#333333";
       if (expandedMasters.includes(variant.id)) {
-        bgColour = "#cceeff"; // highlight if expanded
+        bgColour = "#cceeff";
       }
     } else if (status === "Child") {
       bgColour = "#fff4e5";
@@ -701,19 +761,24 @@ export default function ProductsTable() {
   return (
     <Frame>
       <Page>
-        {/*
-          Title bar with optional actions (for demonstration).
-          You could customise or remove these as needed.
-        */}
-        <TitleBar title="All Products with Master Variants">
-          <button variant="primary" url="/app/products/">
-            Full Product List
+        <Helmet>
+          <script src="https://cdn.botpress.cloud/webchat/v2.3/inject.js"></script>
+          <script src="https://files.bpcontent.cloud/2025/02/24/22/20250224223007-YAA5E131.js"></script>
+        </Helmet>
+        {/* Title bar with action buttons */}
+        <TitleBar title="Master Products">
+          <button variant="primary" url="app/products/">
+            Manage all products 📦
+          </button>
+          <button variant="secondary" ourl="app/master/">
+            Master List 👑
           </button>
         </TitleBar>
 
-        {/* Main card containing the search bar and the index table. */}
+        {/* Card wrapping the search bar and table */}
         <Card padding="0">
-          <Box paddingBlock="300" paddingInline="200" marginBottom="200">
+          {/* Search bar */}
+          <Box paddingBlock="300" paddingInline="300" marginBottom="10">
             <TextField
               label=""
               placeholder="Search by product title"
@@ -739,6 +804,7 @@ export default function ProductsTable() {
             />
           </Box>
 
+          {/* Table of products */}
           <IndexTable
             headings={[
               { title: "Image" },
@@ -758,8 +824,6 @@ export default function ProductsTable() {
           >
             {paginatedProducts.map((product, productIndex) => {
               const isProductExpanded = expandedProductIndex === productIndex;
-
-              // Parent-level product row
               const productRowMarkup = (
                 <IndexTable.Row
                   rowType="data"
@@ -767,7 +831,7 @@ export default function ProductsTable() {
                   key={product.id}
                   position={productIndex}
                   onClick={toggleExpanded(productIndex)}
-                  style={{ backgroundColor: isProductExpanded ? "#e6e6e6" : "#ffffff" }}
+                  style={{ backgroundColor: isProductExpanded ? "#e6e6e6" : "white" }}
                 >
                   <IndexTable.Cell>
                     <Thumbnail
@@ -778,7 +842,9 @@ export default function ProductsTable() {
                   <IndexTable.Cell>
                     <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
                       <div style={{ display: "inline-block", maxWidth: "fit-content", whiteSpace: "nowrap" }}>
-                        <Tag>{product.variants.edges.length} variants</Tag>
+                        <Tag>
+                          {product.variants.edges.length} variants
+                        </Tag>
                       </div>
                       <Text as="span" variant="headingMd" fontWeight="semibold">
                         {product.title}
@@ -792,7 +858,6 @@ export default function ProductsTable() {
                 </IndexTable.Row>
               );
 
-              // Nested rows: each variant (in this scenario, only master variants) plus potential child rows.
               let variantSubRows = null;
               if (isProductExpanded) {
                 variantSubRows = product.variants.edges.map((variantEdge, variantIndex) => {
@@ -800,7 +865,7 @@ export default function ProductsTable() {
                   const { status, bgColour } = getVariantStatus(variant);
                   const shortVariantId = parseVariantId(variant.id);
 
-                  // Master or general variant row
+                  // Master or standard variant row
                   const variantRow = (
                     <IndexTable.Row
                       rowType="child"
@@ -808,7 +873,7 @@ export default function ProductsTable() {
                       key={variant.id}
                       position={productIndex + 1 + variantIndex}
                       onClick={(e) => {
-                        if (e?.stopPropagation) e.stopPropagation();
+                        if (e && typeof e.stopPropagation === "function") e.stopPropagation();
                         if (variant.isMaster) toggleMasterVariant(variant.id);
                       }}
                       className={variant.isMaster && expandedMasters.includes(variant.id) ? "activeRow" : ""}
@@ -825,7 +890,9 @@ export default function ProductsTable() {
                         <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
                           {variant.isMaster ? (
                             <div style={{ display: "inline-block", maxWidth: "fit-content", whiteSpace: "nowrap" }}>
-                              <Tag status="success">Variant Master – {shortVariantId}</Tag>
+                              <Tag status="success">
+                                Variant Master – {shortVariantId}
+                              </Tag>
                             </div>
                           ) : (
                             <div style={{ display: "inline-block", maxWidth: "fit-content", whiteSpace: "nowrap" }}>
@@ -890,7 +957,7 @@ export default function ProductsTable() {
                     </IndexTable.Row>
                   );
 
-                  // Render the child variant rows if this master variant is expanded.
+                  // Nested child variant rows if this is an expanded Master
                   const childVariantRows =
                     variant.isMaster &&
                     variant.childVariants?.length > 0 &&
@@ -908,7 +975,7 @@ export default function ProductsTable() {
                               id={`childVar-${childVar.id}`}
                               key={childVar.id}
                               position={productIndex + 2 + variantIndex + childIndex}
-                              style={{ backgroundColor: childBgColour }}
+                              style={{ background: childBgColour }}
                             >
                               <IndexTable.Cell>
                                 <Thumbnail
@@ -923,14 +990,10 @@ export default function ProductsTable() {
                               </IndexTable.Cell>
                               <IndexTable.Cell>
                                 <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-                                  <div
-                                    style={{
-                                      display: "inline-block",
-                                      maxWidth: "fit-content",
-                                      whiteSpace: "nowrap",
-                                    }}
-                                  >
-                                    <Tag status="warning">Variant – {shortChildId}</Tag>
+                                  <div style={{ display: "inline-block", maxWidth: "fit-content", whiteSpace: "nowrap" }}>
+                                    <Tag status="warning">
+                                      Variant – {shortChildId}
+                                    </Tag>
                                   </div>
                                   <Text as="span" variant="headingSm">
                                     {childVar.product?.title || "Untitled"}
@@ -949,24 +1012,13 @@ export default function ProductsTable() {
                               </IndexTable.Cell>
                               <IndexTable.Cell />
                               <IndexTable.Cell>
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    alignItems: "flex-start",
-                                  }}
-                                >
-                                  <Text
-                                    as="span"
-                                    variant="bodySm"
-                                    fontWeight="bold"
-                                    style={{ marginBottom: "0.5rem" }}
-                                  >
-                                    Child Times
+                                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+                                  <Text as="span" variant="bodySm" fontWeight="bold" style={{ marginBottom: "0.5rem" }}>
+                                    Master Ratio
                                   </Text>
                                   <TextField
                                     label=""
-                                    placeholder="Qty"
+                                    placeholder="1 by default"
                                     type="number"
                                     value={currentQtyValue}
                                     onChange={(value) =>
@@ -1010,7 +1062,7 @@ export default function ProductsTable() {
             })}
           </IndexTable>
 
-          {/* Table pagination controls */}
+          {/* Table-style pagination */}
           <Pagination
             onPrevious={() => setCurrentPage((prev) => prev - 1)}
             onNext={() => setCurrentPage((prev) => prev + 1)}
@@ -1022,7 +1074,7 @@ export default function ProductsTable() {
         </Card>
       </Page>
 
-      {/* Modal for editing the inventory of a master variant */}
+      {/* Inventory Modal */}
       {modalActive && selectedProduct && selectedVariant && (
         <Modal
           open={modalActive}
@@ -1053,7 +1105,7 @@ export default function ProductsTable() {
         </Modal>
       )}
 
-      {/* Modal for assigning children to a master variant */}
+      {/* Children Management Modal */}
       {childrenModalActive && selectedVariant && selectedProduct && (
         <Modal
           open={childrenModalActive}
@@ -1105,7 +1157,6 @@ export default function ProductsTable() {
                   );
                   const isChecked = childrenSelection.includes(item.id);
                   const disabledCheckbox = isChildVariantAssignedElsewhere(item);
-
                   return (
                     <ResourceItem
                       id={item.id}
@@ -1153,10 +1204,14 @@ export default function ProductsTable() {
           </Modal.Section>
         </Modal>
       )}
-
-      {/* Toast notifications */}
       {toastActive && (
-        <Toast content={toastMessage} onDismiss={onDismissToast} error />
+        <div className={toastType === "black" ? "black-toast" : ""}>
+          <Toast
+            content={toastMessage}
+            onDismiss={() => setToastActive(false)}
+            error={toastType === "error"} // Solo se marca como error si corresponde
+          />
+        </div>
       )}
     </Frame>
   );

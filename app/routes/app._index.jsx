@@ -14,6 +14,7 @@ import {
 } from "@shopify/polaris";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
+import { Helmet } from "react-helmet";
 
 // Loader function to authenticate the admin user.
 export const loader = async ({ request }) => {
@@ -111,6 +112,10 @@ export default function Index() {
 
   return (
     <Page>
+      <Helmet>
+        <script src="https://cdn.botpress.cloud/webchat/v2.3/inject.js"></script>
+        <script src="https://files.bpcontent.cloud/2025/02/24/22/20250224223007-YAA5E131.js"></script>
+      </Helmet>
       {/* Title bar with a button to create a new master (this button still triggers the POST action) */}
       <TitleBar title="Synchronize your inventory">
         <button variant="primary" url="/app/products/">
@@ -147,7 +152,7 @@ export default function Index() {
                   <iframe
                     width="560"
                     height="315"
-                    src="https://www.youtube.com/embed/jfKfPfyJRdk"
+                    src="https://www.youtube.com/embed/oEsBAfQXUHo"
                     title="YouTube video player"
                     frameBorder="0"
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
@@ -161,7 +166,7 @@ export default function Index() {
                     Get started with products
                   </Text>
                   <Text as="p" variant="bodyMd">
-                    Manage your products and variants with our interface to manage your Master - Children relationship.
+                    Control your products and variants with our interface to manage your Master - Children, and mutiple variant relationship.
                   </Text>
                 </BlockStack>
 
@@ -223,22 +228,10 @@ export default function Index() {
                         </Link>
                       </span>
                     </InlineStack>
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodyMd">
-                        API
-                      </Text>
-                      <Link
-                        url="https://shopify.dev/docs/api/admin-graphql"
-                        target="_blank"
-                        removeUnderline
-                      >
-                        Video
-                      </Link>
-                    </InlineStack>
                   </BlockStack>
                 </BlockStack>
               </Card>
-              <Card>
+              {/*<Card>
                 <BlockStack gap="200">
                   <Text as="h2" variant="headingMd">
                     Next steps
@@ -267,7 +260,7 @@ export default function Index() {
                     </List.Item>
                   </List>
                 </BlockStack>
-              </Card>
+              </Card>*/} 
             </BlockStack>
           </Layout.Section>
         </Layout>
