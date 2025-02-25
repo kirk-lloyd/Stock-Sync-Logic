@@ -194,7 +194,7 @@ export default function AdditionalPage() {
             </Card>
           </BlockStack>
         </Layout.Section>
-        <Layout.Section variant="oneThird">
+        {/*Layout.Section variant="oneThird">
           <Card>
             <BlockStack gap="200">
               <Text as="h2" variant="headingMd">
@@ -213,7 +213,7 @@ export default function AdditionalPage() {
               </List>
             </BlockStack>
           </Card>
-        </Layout.Section>
+        </Layout.Section>*/}
       </Layout>
     </Page>
   );
