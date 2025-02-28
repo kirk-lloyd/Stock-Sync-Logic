@@ -1,5 +1,4 @@
-// This is your Prisma schema file.
-// Learn more here: https://pris.ly/d/prisma-schema
+// prisma/schema.prisma
 
 generator client {
   provider = "prisma-client-js"
@@ -29,12 +28,8 @@ model session {
   emailVerified Boolean
 }
 
+// Example Stockdb model included for reference, from your existing code.
 model Stockdb {
-  // Remove separate numeric 'id' if you truly want a composite PK:
-  // or keep it if you prefer, but then the real primary key is 'id'
-  // and the composite becomes just a unique constraint. 
-  // For simplicity, let's illustrate a composite PK:
-
   shop             String
   productVariantId String
   title            String?
@@ -42,10 +37,8 @@ model Stockdb {
   productHandle    String?
   oldQuantity      Int      @default(0)
 
-  // Make this pair the primary key
   @@id([shop, productVariantId])
 }
-
 
 model WebhookEvent {
   id              String   @id @default(uuid())
@@ -55,3 +48,25 @@ model WebhookEvent {
 
   @@index([inventoryItemId])
 }
+
+/**
+ * This model stores your subscription & usage data for each shop.
+ * One record per store.
+ */
+model ShopSubscription {
+  id                    String   @id @default(uuid())
+  shop                  String   @unique
+  shopDomain            String?  // Full domain (myshopify.com)
+  plan                  String?  // e.g. "FREE" or "PAID"
+  status                String?  // e.g. "ACTIVE", "CANCELLED", etc.
+  startDate             DateTime?
+  variantsLimit         Int?     @default(0)
+  syncsQuantity         Int?     @default(0)
+  customApiUrl          String?  // Custom URL for webhooks
+  shopifySubscriptionId String? 
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+
+

@@ -1,3 +1,5 @@
+// app/routes/webhooks.inventory-update.jsx
+
 import { json } from "@remix-run/node";
 import crypto from "crypto";
 import prisma from "../db.server.js"; // Adjust if your structure differs
@@ -8,8 +10,8 @@ import prisma from "../db.server.js"; // Adjust if your structure differs
  *
  * This code listens for Shopify Inventory Level webhooks and implements:
  *
- * 1) A short "listening window" aggregator (5s). Any near-simultaneous
- *    updates for the same MASTER combo get batched, preventing collisions.
+ * 1) A short "listening window" aggregator (5 seconds). Any near-simultaneous
+ *    updates for the same MASTER combination are batched, preventing collisions.
  *
  * 2) "qtyold" logic, but now stored in our Prisma database as the
  *    authoritative source for oldQty retrieval. We still update the
@@ -32,6 +34,8 @@ import prisma from "../db.server.js"; // Adjust if your structure differs
  * ------------------------------------------------------------------
  * 0) SHORT-TERM DEDUPLICATION (10s FOR EXACT PAYLOAD)
  * ------------------------------------------------------------------
+ * We store a key in a Map for 10 seconds, to prevent re-processing
+ * the exact same payload multiple times within that short window.
  */
 const recentlyProcessedExact = new Map();
 
@@ -55,6 +59,8 @@ function buildExactDedupKey(payload) {
  * ------------------------------------------------------------------
  * 0.1) 6-SECOND LOCK FOR (INVENTORY_ITEM + LOCATION)
  * ------------------------------------------------------------------
+ * After receiving an update for a specific (inventoryItem, location),
+ * we lock it for 6 seconds to avoid re-entries that could cause collisions.
  */
 const recentlyTouched = new Map();
 
@@ -73,6 +79,9 @@ function hasComboKey(key) {
  * ------------------------------------------------------------------
  * 0.2) PREDICTED (FUTURE) UPDATES MAP
  * ------------------------------------------------------------------
+ * If we programmatically update inventory in Shopify, we mark that
+ * update as "predicted" to avoid re-processing it when Shopify
+ * sends back a webhook with the resulting changes.
  */
 const predictedUpdates = new Map();
 
@@ -95,6 +104,7 @@ function hasPredictedUpdate(pKey) {
  * ------------------------------------------------------------------
  * 1) HMAC VERIFICATION
  * ------------------------------------------------------------------
+ * We verify the X-Shopify-Hmac-Sha256 header to ensure authenticity.
  */
 function verifyHmac(body, hmacHeader, secret) {
   const digest = crypto
@@ -108,6 +118,8 @@ function verifyHmac(body, hmacHeader, secret) {
  * ------------------------------------------------------------------
  * UTILITY: RETRIEVE ADMIN HEADERS AND GRAPHQL URL FOR A GIVEN SHOP
  * ------------------------------------------------------------------
+ * We look up the session record in Prisma, which contains the
+ * X-Shopify-Access-Token so we can make Admin API calls.
  */
 async function getShopSessionHeaders(shopDomain) {
   // Look up the session in your database
@@ -194,6 +206,7 @@ async function activateInventoryItem(shopDomain, adminHeaders, inventoryItemId, 
  * ------------------------------------------------------------------
  * 3) MUTATION => CHANGE INVENTORY QUANTITY
  * ------------------------------------------------------------------
+ * This function sets the on_hand (available) inventory in Shopify.
  */
 async function setInventoryQuantity(
   shopDomain,
@@ -214,13 +227,13 @@ async function setInventoryQuantity(
     cleanInventoryItemId = `gid://shopify/InventoryItem/${inventoryItemId}`;
   }
 
-  // Custom reference for app-based updates (optional)
+  // Optional reference link to differentiate internal vs external updates
   const MY_APP_URL = process.env.MY_APP_URL || "https://your-app-url.com";
   const referenceDocumentUriValue = internal
     ? `${MY_APP_URL}/by_app/internal-update`
     : `${MY_APP_URL}/by_app/external-update`;
 
-  // Mark a "predicted" update to avoid loops
+  // Mark this as a predicted update to avoid re-processing our own changes
   const pKey = buildPredictedKey(
     cleanInventoryItemId.replace("gid://shopify/InventoryItem/", ""),
     locationId,
@@ -284,15 +297,13 @@ async function setInventoryQuantity(
 
 /*
  * ------------------------------------------------------------------
- * 3.1) (Kept) GET/SET QTYOLD METAFIELD ON SHOPIFY FOR REFERENCE
+ * 3.1) GET/SET QTYOLD METAFIELD ON SHOPIFY (FOR REFERENCE)
  * ------------------------------------------------------------------
- * We are no longer reading from the Shopify metafield to retrieve oldQty.
- * Instead, we read/write oldQty from our Prisma database. We do, however,
- * still update this metafield to keep a secondary record inside Shopify.
+ * We still update the 'qtyold' metafield in Shopify, but do not rely
+ * on it as our source of truth. We rely on Prisma's DB instead.
  */
 async function getQtyOldValue(shopDomain, adminHeaders, variantId) {
-  // NOTE: We will no longer call this at the start for the oldQty read,
-  // but we keep it here if you still need it for debugging or transitions.
+  // Typically unused now, but kept for reference or debugging
   const query = `
     query GetQtyOld($id: ID!) {
       productVariant(id: $id) {
@@ -324,7 +335,7 @@ async function getQtyOldValue(shopDomain, adminHeaders, variantId) {
 }
 
 async function setQtyOldValue(shopDomain, adminHeaders, variantId, newQty) {
-  // This still updates the Shopify metafield so you can see oldQty in the store
+  // Writes newQty to the 'qtyold' metafield in Shopify
   const mutation = `
     mutation metafieldsSetVariant($metafields: [MetafieldsSetInput!]!) {
       metafieldsSet(metafields: $metafields) {
@@ -378,40 +389,22 @@ async function setQtyOldValue(shopDomain, adminHeaders, variantId, newQty) {
 
 /*
  * ------------------------------------------------------------------
- * 3.2) (NEW) GET/SET QTYOLD FROM PRISMA DATABASE
+ * 3.2) GET/SET QTYOLD FROM PRISMA DB
  * ------------------------------------------------------------------
- * We now retrieve the oldQty from our DB and save it back after
- * we've made our calculations. This ensures multi-tenant isolation
- * by scoping queries to the shopDomain.
+ * We read/write oldQty from our Stockdb model instead of the Shopify
+ * metafield. This ensures multi-tenant isolation and faster lookups.
  */
 
-// Helper to strip the "gid://shopify/ProductVariant/" prefix
+// Normalises a GID so we're left with only the numeric part
 function normaliseVariantId(variantId) {
   if (!variantId) return null;
   return variantId.replace("gid://shopify/ProductVariant/", "");
 }
 
-// Retrieve oldQty from your DB for this shop + variant
 async function getQtyOldValueDB(shopDomain, variantId) {
-  // 'variantId' here is the 'gid://...' string or a raw ID; we normalise
+  // 'variantId' might be a GID or a numeric ID; we normalise it
   const normalisedId = normaliseVariantId(variantId);
 
-  /**
-   * You’ll want to have an `oldQuantity` column in your Prisma schema.
-   * For example, if you're using the `Stockdb` model, add a column:
-   *
-   *  model Stockdb {
-   *    id               Int      @id @default(autoincrement())
-   *    title            String
-   *    shop             String
-   *    productId        String
-   *    productHandle    String
-   *    productVariantId String
-   *    oldQuantity      Int      @default(0)    // <--- new column
-   *  }
-   *
-   * Then run your migration. We do a simple findFirst + default = 0 if not found.
-   */
   const record = await prisma.stockdb.findFirst({
     where: {
       shop: shopDomain,
@@ -424,30 +417,25 @@ async function getQtyOldValueDB(shopDomain, variantId) {
     return 0;
   }
 
-  // You may also want to ensure record.oldQuantity is always an integer
   return record.oldQuantity ?? 0;
 }
 
-// Store oldQty back into the DB
 async function setQtyOldValueDB(shopDomain, variantId, newQty) {
   const normalisedId = normaliseVariantId(variantId);
 
-  // We'll upsert in case there's no existing record
+  // Upsert ensures we either create a new row or update an existing one
   await prisma.stockdb.upsert({
     where: {
-      // This object key is typically "shop_productVariantId" or 
-      // "shop_productVariantId_composite" depending on how Prisma 
-      // auto-generates the field name. 
-      // Usually it's the combination of the columns joined by underscores:
+      // Typically "shop_productVariantId" or something similar
       shop_productVariantId: {
         shop: shopDomain,
         productVariantId: normalisedId,
       },
     },
     update: { oldQuantity: newQty },
-    create: { 
-      shop: shopDomain, 
-      productVariantId: normalisedId, 
+    create: {
+      shop: shopDomain,
+      productVariantId: normalisedId,
       oldQuantity: newQty,
       title: "Unknown",
       productId: "unknown",
@@ -466,7 +454,7 @@ async function setQtyOldValueDB(shopDomain, variantId, newQty) {
 async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
   console.log(`🔍 getMasterChildInfo => inventory item: ${inventoryItemId}`);
 
-  // 1) Find the variant associated with this inventory item
+  // 1) Find the variant (if any) associated with the inventory item
   const response = await fetch(
     `https://${shopDomain}/admin/api/2024-10/graphql.json`,
     {
@@ -540,7 +528,7 @@ async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
     };
   }
 
-  // If not MASTER, check if it's a CHILD
+  // If not MASTER, check if it is a CHILD
   console.log("🔎 Searching the store for a MASTER referencing this item as a CHILD...");
   let hasNextPage = true;
   let cursor = null;
@@ -646,6 +634,7 @@ async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
  * ------------------------------------------------------------------
  * 4.1) GET THE "qtymanagement" (CHILD DIVISOR)
  * ------------------------------------------------------------------
+ * childDivisor=1 => the child quantity always matches the MASTER.
  */
 async function getVariantQtyManagement(shopDomain, adminHeaders, variantId) {
   const query = `
@@ -677,6 +666,8 @@ async function getVariantQtyManagement(shopDomain, adminHeaders, variantId) {
  * ------------------------------------------------------------------
  * 4.2) GET CHILDREN (inventoryItemId) OF A MASTER
  * ------------------------------------------------------------------
+ * We parse the 'childrenkey' from the MASTER variant, then attempt
+ * to find these child variants within the same product or via fallback.
  */
 async function getChildrenInventoryItems(shopDomain, adminHeaders, masterVariantId) {
   const query = `
@@ -735,7 +726,7 @@ async function getChildrenInventoryItems(shopDomain, adminHeaders, masterVariant
     }
   }
 
-  // Normalise
+  // Normalise them by removing the Shopify GID prefix, if present
   const normChildIds = childIds.map((cid) =>
     cid.startsWith("gid://shopify/ProductVariant/")
       ? cid.replace("gid://shopify/ProductVariant/", "")
@@ -818,6 +809,8 @@ async function getChildrenInventoryItems(shopDomain, adminHeaders, masterVariant
  * ------------------------------------------------------------------
  * 5) CONCURRENCY LOCK
  * ------------------------------------------------------------------
+ * We set a lock (keyed by e.g. MASTER item ID + location) to avoid
+ * running multiple overlapping updates.
  */
 const updateLocks = new Map();
 
@@ -849,6 +842,8 @@ async function processWithDeferred(key, initialUpdate, processUpdate) {
  * ------------------------------------------------------------------
  * 6) GET CURRENT "available" QTY
  * ------------------------------------------------------------------
+ * We query the Inventory API for the 'available' quantity at the given
+ * location. If not found, we attempt to activate the item in that location.
  */
 async function getCurrentAvailableQuantity(shopDomain, adminHeaders, inventoryItemId, locationId) {
   async function doQuery(iid, locId) {
@@ -856,7 +851,7 @@ async function getCurrentAvailableQuantity(shopDomain, adminHeaders, inventoryIt
       query getInventoryLevels($inventoryItemId: ID!) {
         inventoryItem(id: $inventoryItemId) {
           id
-          inventoryLevels(first: 50) {
+          inventoryLevels(first: 100) {
             edges {
               node {
                 location {
@@ -964,10 +959,12 @@ async function getInventoryItemIdFromVariantId(shopDomain, adminHeaders, variant
 
 /*
  * ------------------------------------------------------------------
- * 7) LISTENING WINDOW IMPLEMENTATION
+ * 7) LISTENING WINDOW IMPLEMENTATION (5 seconds)
  * ------------------------------------------------------------------
+ * We collect multiple events for the same MASTER combo and process
+ * them in a single pass.
  */
-const aggregatorMap = new Map(); // key: (masterItemId + locationId) => { events: [...], timer }
+const aggregatorMap = new Map(); // comboKey => { events: [...], timer }
 
 function addEventToAggregator(comboKey, event) {
   if (aggregatorMap.has(comboKey)) {
@@ -995,13 +992,13 @@ async function processAggregatorEvents(comboKey) {
     `⌛ Listening window closed => combo:${comboKey}, total events: ${events.length}`
   );
 
-  // We'll pick the last event for each child + possibly one master event
+  // We pick the last event for each child and optionally one final MASTER event
   const finalChildMap = new Map();
   let finalMaster = null;
 
   for (const ev of events) {
     if (ev.isMaster) {
-      finalMaster = ev; // Overwrite if multiple MASTER updates occurred
+      finalMaster = ev; // Overwrite if multiple MASTER updates
     } else {
       finalChildMap.set(ev.childVariantId, ev); // Overwrite if multiple CHILD updates
     }
@@ -1016,7 +1013,7 @@ async function processAggregatorEvents(comboKey) {
     }
   }
 
-  // Then the master
+  // Then the MASTER
   if (finalMaster) {
     try {
       await handleMasterEvent(finalMaster);
@@ -1040,11 +1037,11 @@ async function handleChildEvent(ev) {
 
   const childDiff = ev.newQty - ev.oldQty;
 
-  // Fetch childDivisor
+  // Determine the child's qtymanagement setting
   const childDivisor = await getVariantQtyManagement(shopDomain, adminHeaders, ev.childVariantId);
   console.log(`childDivisor => ${childDivisor}`);
 
-  // Retrieve MASTER's old quantity
+  // Retrieve the MASTER's old quantity
   const masterOldQty = await getCurrentAvailableQuantity(
     shopDomain,
     adminHeaders,
@@ -1067,7 +1064,7 @@ async function handleChildEvent(ev) {
     ev.newQty
   );
 
-  // 2) If MASTER's qty has changed
+  // 2) If MASTER's qty has changed, update it
   if (newMasterQty !== masterOldQty) {
     await setInventoryQuantity(
       shopDomain,
@@ -1118,7 +1115,7 @@ async function handleChildEvent(ev) {
     }
   }
 
-  // 4) Update qtyold (both in DB and the Shopify metafield) for the CHILD, MASTER, and siblings
+  // 4) Update qtyold (both in DB and the Shopify metafield) for all relevant variants
   for (const vid of updatedVariants) {
     let finalQty = 0;
     if (vid === ev.childVariantId) {
@@ -1126,7 +1123,7 @@ async function handleChildEvent(ev) {
     } else if (vid === ev.masterVariantId) {
       finalQty = newMasterQty;
     } else {
-      // A sibling => fetch final
+      // A sibling => retrieve final post-update
       const siblingInvId = await getInventoryItemIdFromVariantId(shopDomain, adminHeaders, vid);
       if (!siblingInvId) continue;
       const realQty = await getCurrentAvailableQuantity(
@@ -1147,13 +1144,14 @@ async function handleChildEvent(ev) {
 }
 
 /**
- * MASTER => recalc children => if childDivisor=1 => child=MASTER, else floor(MASTER / childDivisor)
+ * MASTER => recalc children => if childDivisor=1 => child=MASTER,
+ * else floor(MASTER / childDivisor)
  */
 async function handleMasterEvent(ev) {
   const { shopDomain, adminHeaders } = ev;
   console.log(`handleMasterEvent => oldQty:${ev.oldQty}, newQty:${ev.newQty}`);
 
-  // Force MASTER quantity if needed
+  // Ensure MASTER's inventory is set as expected
   const shopMasterQty = await getCurrentAvailableQuantity(
     shopDomain,
     adminHeaders,
@@ -1168,6 +1166,8 @@ async function handleMasterEvent(ev) {
   const children = await getChildrenInventoryItems(shopDomain, adminHeaders, ev.variantId);
   const updatedVariants = new Set();
   updatedVariants.add(ev.variantId);
+
+  let childrenData = [];
 
   for (const c of children) {
     const cid = c.inventoryItemId.replace("gid://shopify/InventoryItem/", "");
@@ -1185,6 +1185,12 @@ async function handleMasterEvent(ev) {
       await setInventoryQuantity(shopDomain, adminHeaders, cid, ev.locationId, newCQty, true);
       updatedVariants.add(c.variantId);
     }
+    // ✅ Agregar cada CHILD a `childrenData`
+    childrenData.push({
+      variantId: c.variantId,
+      oldQty: oldCQty,
+      newQty: newCQty,
+    });
   }
 
   // Update 'qtyold' in DB + metafield for MASTER + changed children
@@ -1205,12 +1211,76 @@ async function handleMasterEvent(ev) {
       await setQtyOldValue(shopDomain, adminHeaders, vId, realChildQty);
     }
   }
-}
+  // Enviar el webhook con los datos finales
+  console.log("🚀 Calling sendCustomWebhook...");
+    await sendCustomWebhook(shopDomain, { 
+      variantId: ev.variantId, 
+      oldQty: ev.oldQty, 
+      newQty: ev.newQty 
+    }, childrenData);
+    console.log("📬 sendCustomWebhook function executed.");
+  }
+
+  async function sendCustomWebhook(shopDomain, masterData, childrenData) {
+    try {
+      console.log(`🔍 Retrieving customApiUrl for shop: ${shopDomain}`);
+
+      const subscription = await prisma.shopSubscription.findUnique({
+        where: { shop: shopDomain },
+      });
+
+      if (!subscription || !subscription.customApiUrl) {
+        console.warn(`⚠️ No customApiUrl found for shop: ${shopDomain}, skipping webhook.`);
+        return;
+      }
+
+      const webhookUrl = subscription.customApiUrl;
+      console.log(`📡 Sending webhook to: ${webhookUrl}`);
+
+      // Estructura del webhook en JSON
+      const payload = {
+        masterID: masterData.variantId,
+        "master old inventory": masterData.oldQty,
+        "master new inventory": masterData.newQty,
+        Modified: true,
+        children: childrenData.map((child) => ({
+          "child ID": child.variantId,
+          "child old inventory": child.oldQty,
+          "child new inventory": child.newQty,
+          Modified: true,
+        })),
+      };
+
+      console.log(`📦 Webhook Payload:`, JSON.stringify(payload, null, 2));
+
+      // Enviar webhook con method POST
+      const response = await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      console.log(`📨 Webhook response status: ${response.status}`);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`❌ Failed to send custom webhook. Status: ${response.status}, Response: ${errorText}`);
+      } else {
+        console.log(`✅ Custom webhook sent successfully to ${webhookUrl}`);
+      }
+    } catch (error) {
+      console.error("❌ Error sending custom webhook:", error);
+    }
+  }
+
 
 /*
  * ------------------------------------------------------------------
  * 8) MAIN WEBHOOK HANDLER
  * ------------------------------------------------------------------
+ * This 'action' function responds to POST requests from Shopify.
  */
 export const action = async ({ request }) => {
   console.log("🔔 Inventory Webhook => aggregator + difference-based + childDivisor=1 logic.");
@@ -1234,7 +1304,24 @@ export const action = async ({ request }) => {
   }
   console.log("✅ HMAC verified successfully.");
 
-  // 3) Short-term dedup => 10s
+  // 3) Check active subscription
+  const shopDomain = request.headers.get("X-Shopify-Shop-Domain");
+  if (!shopDomain) {
+    console.error("No X-Shopify-Shop-Domain header => cannot retrieve tokens");
+    return new Response("Shop domain missing", { status: 400 });
+  }
+
+  // Check subscription status in the database
+  const subscription = await prisma.shopSubscription.findUnique({
+    where: { shop: shopDomain }
+  });
+
+  if (!subscription || subscription.plan !== "PAID" || subscription.status !== "ACTIVE") {
+    console.log(`⛔ Ignored Webhook - Plan: ${subscription?.plan}, Status: ${subscription?.status}`);
+    return new Response("Skipped - Subscription not active", { status: 200 });
+  }
+
+  // 4) Short-term dedup => 10 seconds
   const dedupKey = buildExactDedupKey(payload);
   if (hasExactKey(dedupKey)) {
     console.log(`Skipping repeated => ${dedupKey}`);
@@ -1257,14 +1344,7 @@ export const action = async ({ request }) => {
   }
   markComboKey(shortComboKey);
 
-  // 6) Identify the shop domain from the webhook header
-  const shopDomain = request.headers.get("X-Shopify-Shop-Domain");
-  if (!shopDomain) {
-    console.error("No X-Shopify-Shop-Domain header => cannot retrieve tokens");
-    return new Response("Shop domain missing", { status: 400 });
-  }
-
-  // 7) Retrieve admin headers from the DB
+  // 7) Retrieve admin headers from DB
   let adminHeaders, adminApiUrl;
   try {
     const result = await getShopSessionHeaders(shopDomain);
@@ -1284,16 +1364,13 @@ export const action = async ({ request }) => {
   // Determine if this item is MASTER or CHILD
   const info = await getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId);
   if (!info) {
-    console.log("No MASTER/CHILD relationship found; performing a standard update without difference-based logic.");
+    console.log("No MASTER/CHILD relationship found; performing a direct update.");
 
-    // If no relationship, just do a direct update
+    // If no relationship, just set the quantity directly in Shopify
     await setInventoryQuantity(shopDomain, adminHeaders, inventoryItemId, locationId, newQty);
 
-    // Also store the new qty as oldQty in the DB (for the next event),
-    // but we have no variantId from getMasterChildInfo => fallback logic:
-    // We'll attempt to find the variant ID from inventoryItem => variant
-    // purely to keep DB in sync.
-    // If that fails, we simply skip storing in DB.
+    // Also store the new qty as oldQty in the DB for future reference,
+    // but we need a variant ID to do that. We'll try a quick fallback:
     const fallbackVariantId = await fetch(
       `https://${shopDomain}/admin/api/2024-10/graphql.json`,
       {
@@ -1329,8 +1406,7 @@ export const action = async ({ request }) => {
     return new Response("No Master/Child => performed a direct update", { status: 200 });
   }
 
-  // Instead of calling getQtyOldValue(...) from Shopify,
-  // we retrieve the oldQty from our DB:
+  // If we do have MASTER or CHILD info, handle aggregator logic
   let variantId;
   let isMaster = false;
 
@@ -1341,13 +1417,12 @@ export const action = async ({ request }) => {
     isMaster = false;
     variantId = info.childVariantId;
   }
-  // NEW: read oldQty from Prisma, NOT from the metafield
-  const oldQty = await getQtyOldValueDB(shopDomain, variantId);
 
+  // 9) Retrieve oldQty from DB instead of from Shopify
+  const oldQty = await getQtyOldValueDB(shopDomain, variantId);
   console.log(`(DB-based oldQty) => old:${oldQty}, new:${newQty}`);
 
-  // aggregator key => for MASTER => (masterInventoryItemId + locationId)
-  // for CHILD => (masterInventoryItemId + locationId) as well
+  // aggregator key => MASTER item + location
   let comboKey;
   if (info.isMaster) {
     comboKey = `${info.inventoryItemId}-${locationId}`;
@@ -1366,6 +1441,7 @@ export const action = async ({ request }) => {
   };
 
   if (info.isChild) {
+    // CHILD
     eventObj.masterInventoryItemId = info.masterInventoryItemId;
     eventObj.masterVariantId = info.masterVariantId;
     eventObj.childVariantId = info.childVariantId;
@@ -1376,7 +1452,7 @@ export const action = async ({ request }) => {
     eventObj.inventoryItemId = info.inventoryItemId;
   }
 
-  // 9) Pass this to the aggregator => short queue
+  // 10) Enqueue for aggregator processing
   addEventToAggregator(comboKey, eventObj);
 
   return new Response("Event queued => waiting for aggregator to finalise", { status: 200 });
