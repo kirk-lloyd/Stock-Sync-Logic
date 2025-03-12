@@ -3,8 +3,8 @@
 client_id = "7b468ac19684e5b95cebc5e1e3ae76f2"
 application_url = "https://luther-new-yourself-abroad.trycloudflare.com"
 embedded = true
-name = "SyncLogic"
-handle = "stocksynclogic"
+name = "Projekt: Stock Control Master"
+handle = "stockcontrolmaster"
 
 [webhooks]
 api_version = "2024-10"

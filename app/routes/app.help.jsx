@@ -11,7 +11,7 @@ import {
 import { TitleBar } from "@shopify/app-bridge-react";
 import { Helmet } from "react-helmet";
 
-// AdditionalPage renders the help page for Synclogic, providing detailed documentation.
+// AdditionalPage renders the help page for Projekt: Stock Control Master, providing detailed documentation.
 export default function AdditionalPage() {
   return (
     <Page>
@@ -36,28 +36,28 @@ export default function AdditionalPage() {
       <Layout>
         <Layout.Section>
           <BlockStack gap="500">
-            {/* Card 1: Introduction to Synclogic */}
+            {/* Card 1: Introduction to Projekt: Stock Control Master */}
             <Card>
               <BlockStack gap="400">
                 <Text as="H1" variant="headingLg">
-                  What is Synclogic
+                  What is Projekt: Stock Control Master?
                 </Text>
                 <Text as="p" variant="bodyMd">
-                  Synclogic is a user-friendly inventory synchronisation tool
+                  Projekt: Stock Control Master  is a user-friendly inventory synchronisation tool
                   designed to help you avoid errors in stock management.
                   It automatically updates your inventory across products,
                   ensuring your stock levels are always accurate.
                 </Text>
               </BlockStack>
             </Card>
-            {/* Card 2: How to use Synclogic */}
+            {/* Card 2: How to use Projekt: Stock Control Master */}
             <Card>
               <BlockStack gap="400">
                 <Text as="H1" variant="headingLg">
-                  How to use Synclogic
+                  How to use Projekt: Stock Control Master 
                 </Text>
                 <Text as="p" variant="bodyMd">
-                  Using Synclogic is straightforward and helps prevent mistakes
+                  Using Projekt: Stock Control Master  is straightforward and helps prevent mistakes
                   in inventory management. To set it up, follow these steps:
                   <br />
                   <br /><strong></strong>
@@ -71,7 +71,7 @@ export default function AdditionalPage() {
                   a fraction of the Master, configure a “Master Ratio” to adjust
                   the stock accordingly.
                   <br />
-                  4. Save your changes and let Synclogic do the rest.
+                  4. Save your changes and let Projekt: Stock Control Master do the rest.
                 </Text>
                 {/* 3. Embedded YouTube video between the welcome text and the next section */}
                 <div style={{ display: "flex", justifyContent: "center", margin: "1rem 0" }}>
@@ -137,11 +137,11 @@ export default function AdditionalPage() {
                   How to assign a Child to a Master
                 </Text>
                 <Text as="p" variant="bodyMd">
-                  Assigning a Child to a Master in Synclogic is simple within your
+                  Assigning a Child to a Master in Projekt: Stock Control Master is simple within your
                   Shopify store:
                   <br />
                   <br />
-                  1. Open Synclogic in your Shopify store.
+                  1. Open Projekt: Stock Control Master in your Shopify store.
                   <br />
                   2. Select the product that will serve as the Master.
                   <br />

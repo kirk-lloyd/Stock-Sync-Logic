@@ -450,6 +450,10 @@ async function setQtyOldValueDB(shopDomain, variantId, newQty) {
  * ------------------------------------------------------------------
  * 4) DETERMINE IF THIS ITEM IS MASTER OR CHILD
  * ------------------------------------------------------------------
+ * OPTIMISED VERSION: Directly checks the variant's metafields
+ * to determine master/child relationship without querying all products.
+ * - Masters have 'childrenkey' metafield with list of child variants
+ * - Children have 'parentmaster' metafield with their master variant
  */
 async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
   console.log(`🔍 getMasterChildInfo => inventory item: ${inventoryItemId}`);
@@ -475,7 +479,7 @@ async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
                   id
                   title
                 }
-                metafields(first: 250) {
+                metafields(first: 10) {
                   edges {
                     node {
                       namespace
@@ -494,6 +498,7 @@ async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
       }),
     }
   );
+  
   const data = await response.json();
   const variantNode = data?.data?.inventoryItem?.variant;
   if (!variantNode) {
@@ -502,6 +507,8 @@ async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
   }
 
   const metafields = variantNode.metafields?.edges || [];
+
+  // Check if this variant is a MASTER
   const masterField = metafields.find(
     (m) => m.node.namespace === "projektstocksyncmaster" && m.node.key === "master"
   );
@@ -528,105 +535,51 @@ async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
     };
   }
 
-  // If not MASTER, check if it is a CHILD
-  console.log("🔎 Searching the store for a MASTER referencing this item as a CHILD...");
-  let hasNextPage = true;
-  let cursor = null;
-
-  while (hasNextPage) {
-    const allProdsQuery = `
-      query getAllVariants($cursor: String) {
-        products(first: 50, after: $cursor) {
-          edges {
-            node {
-              id
-              variants(first: 50) {
-                edges {
-                  node {
-                    id
-                    inventoryItem {
-                      id
-                    }
-                    metafields(first: 10) {
-                      edges {
-                        node {
-                          namespace
-                          key
-                          value
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-        }
-      }
-    `;
-    const resp = await fetch(
-      `https://${shopDomain}/admin/api/2024-10/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          ...adminHeaders,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ query: allProdsQuery, variables: { cursor } }),
-      }
-    );
-    const allData = await resp.json();
-    const allProducts = allData?.data?.products?.edges || [];
-
-    for (const pEdge of allProducts) {
-      for (const vEdge of pEdge.node.variants.edges) {
-        const possibleMaster = vEdge.node;
-        const pmfs = possibleMaster.metafields?.edges || [];
-        const masterFlag = pmfs.find(
-          (m) => m.node.namespace === "projektstocksyncmaster" && m.node.key === "master"
-        );
-        const isMasterVariant =
-          masterFlag?.node?.value?.trim().toLowerCase() === "true";
-        if (!isMasterVariant) continue;
-
-        const childrenKey = pmfs.find(
-          (m) =>
-            m.node.namespace === "projektstocksyncchildren" && m.node.key === "childrenkey"
-        );
-        let childArr = [];
-        if (childrenKey?.node?.value) {
-          try {
-            childArr = JSON.parse(childrenKey.node.value);
-          } catch (err) {
-            console.error("❌ Error parsing 'childrenkey' =>", err);
-          }
-        }
-        if (childArr.includes(variantNode.id)) {
-          console.log(
-            `✅ Identified CHILD => MASTER: ${possibleMaster.id}, CHILD: ${variantNode.id}`
-          );
-          return {
-            isChild: true,
-            childVariantId: variantNode.id,
-            masterVariantId: possibleMaster.id,
-            masterInventoryItemId: possibleMaster.inventoryItem?.id
-              ? possibleMaster.inventoryItem.id.replace("gid://shopify/InventoryItem/", "")
-              : null,
-            inventoryItemId,
-          };
-        }
-      }
+  // Check if this variant is a CHILD (using the parentmaster metafield)
+  const parentMasterField = metafields.find(
+    (m) => m.node.namespace === "projektstocksyncparentmaster" && m.node.key === "parentmaster"
+  );
+  
+  if (parentMasterField?.node?.value) {
+    console.log("✅ This variant is designated as CHILD.");
+    let masterVariantId;
+    
+    try {
+      // The parentmaster field should contain the master variant ID
+      const parsedValue = JSON.parse(parentMasterField.node.value);
+      masterVariantId = Array.isArray(parsedValue) && parsedValue.length > 0 ? parsedValue[0] : null;
+    } catch (err) {
+      console.error("❌ Error parsing 'parentmaster' metafield =>", err);
+      return null;
     }
-
-    hasNextPage = allData.data?.products?.pageInfo?.hasNextPage;
-    cursor = allData.data?.products?.pageInfo?.endCursor;
+    
+    if (!masterVariantId) {
+      console.log("❌ No valid master variant ID found in 'parentmaster' metafield.");
+      return null;
+    }
+    
+    // Get the master's inventory item ID
+    const masterInventoryItemId = await getInventoryItemIdFromVariantId(
+      shopDomain, 
+      adminHeaders, 
+      masterVariantId
+    );
+    
+    if (!masterInventoryItemId) {
+      console.error("❌ Could not find inventory item for master variant:", masterVariantId);
+      return null;
+    }
+    
+    return {
+      isChild: true,
+      childVariantId: variantNode.id,
+      masterVariantId: masterVariantId,
+      masterInventoryItemId: masterInventoryItemId,
+      inventoryItemId,
+    };
   }
 
-  console.log("❌ No referencing MASTER found; thus, this is not a CHILD either.");
+  console.log("❌ No MASTER/CHILD relationship detected for this variant.");
   return null;
 }
 
@@ -666,8 +619,8 @@ async function getVariantQtyManagement(shopDomain, adminHeaders, variantId) {
  * ------------------------------------------------------------------
  * 4.2) GET CHILDREN (inventoryItemId) OF A MASTER
  * ------------------------------------------------------------------
- * We parse the 'childrenkey' from the MASTER variant, then attempt
- * to find these child variants within the same product or via fallback.
+ * OPTIMISED VERSION: Uses the 'childrenkey' metafield directly
+ * without searching through all products.
  */
 async function getChildrenInventoryItems(shopDomain, adminHeaders, masterVariantId) {
   const query = `
@@ -676,18 +629,6 @@ async function getChildrenInventoryItems(shopDomain, adminHeaders, masterVariant
         id
         metafield(namespace: "projektstocksyncchildren", key: "childrenkey") {
           value
-        }
-        product {
-          variants(first: 250) {
-            edges {
-              node {
-                id
-                inventoryItem {
-                  id
-                }
-              }
-            }
-          }
         }
       }
     }
@@ -729,78 +670,62 @@ async function getChildrenInventoryItems(shopDomain, adminHeaders, masterVariant
   // Normalise them by removing the Shopify GID prefix, if present
   const normChildIds = childIds.map((cid) =>
     cid.startsWith("gid://shopify/ProductVariant/")
-      ? cid.replace("gid://shopify/ProductVariant/", "")
-      : cid
+      ? cid
+      : `gid://shopify/ProductVariant/${cid}`
   );
 
-  // 1) Attempt to locate them within the MASTER's product
-  const productEdges = variant.product?.variants?.edges || [];
-  let foundChildren = [];
-  let missingIds = [];
-
-  for (const cid of normChildIds) {
-    const childEdge = productEdges.find(
-      (e) => e.node.id.replace("gid://shopify/ProductVariant/", "") === cid
-    );
-    if (!childEdge) {
-      console.warn(`⚠️ Child not found within the same product => ${cid}`);
-      missingIds.push(cid);
-    } else {
-      foundChildren.push({
-        variantId: childEdge.node.id,
-        inventoryItemId: childEdge.node.inventoryItem?.id,
-      });
-    }
+  // Fetch all variants in a single query
+  if (normChildIds.length === 0) {
+    return [];
   }
-
-  // 2) Fallback query for missing IDs
-  if (missingIds.length > 0) {
-    console.log(`🔎 Attempting a fallback fetch for missing variant IDs =>`, missingIds);
-    const fallbackQuery = `
-      query GetMissingVariants($variantIds: [ID!]!) {
-        nodes(ids: $variantIds) {
-          ... on ProductVariant {
+  
+  const batchQuery = `
+    query GetBatchVariants($variantIds: [ID!]!) {
+      nodes(ids: $variantIds) {
+        ... on ProductVariant {
+          id
+          inventoryItem {
             id
-            inventoryItem {
-              id
-            }
           }
         }
       }
-    `;
-    const fallResp = await fetch(
-      `https://${shopDomain}/admin/api/2024-10/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          ...adminHeaders,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          query: fallbackQuery,
-          variables: {
-            variantIds: missingIds.map((x) => `gid://shopify/ProductVariant/${x}`),
-          },
-        }),
-      }
-    );
-    const fallData = await fallResp.json();
-    if (fallData.errors) {
-      console.error("❌ getChildrenInventoryItems => fallback error =>", fallData.errors);
+    }
+  `;
+  
+  const batchResp = await fetch(
+    `https://${shopDomain}/admin/api/2024-10/graphql.json`,
+    {
+      method: "POST",
+      headers: {
+        ...adminHeaders,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: batchQuery,
+        variables: { variantIds: normChildIds },
+      }),
+    }
+  );
+  
+  const batchData = await batchResp.json();
+  if (batchData.errors) {
+    console.error("❌ Error fetching child variants =>", batchData.errors);
+    return [];
+  }
+  
+  const foundChildren = [];
+  
+  for (const node of batchData.data?.nodes || []) {
+    if (node && node.inventoryItem?.id) {
+      foundChildren.push({
+        variantId: node.id,
+        inventoryItemId: node.inventoryItem.id,
+      });
     } else {
-      for (const node of fallData.data?.nodes || []) {
-        if (node && node.inventoryItem?.id) {
-          foundChildren.push({
-            variantId: node.id,
-            inventoryItemId: node.inventoryItem.id,
-          });
-        } else {
-          console.warn(`⚠️ Missing inventoryItem for => ${node?.id}`);
-        }
-      }
+      console.warn(`⚠️ Missing inventoryItem for => ${node?.id}`);
     }
   }
-
+  
   console.log("✅ Final children => MASTER:", JSON.stringify(foundChildren, null, 2));
   return foundChildren;
 }
@@ -1185,7 +1110,7 @@ async function handleMasterEvent(ev) {
       await setInventoryQuantity(shopDomain, adminHeaders, cid, ev.locationId, newCQty, true);
       updatedVariants.add(c.variantId);
     }
-    // ✅ Agregar cada CHILD a `childrenData`
+    // Adding each CHILD to childrenData
     childrenData.push({
       variantId: c.variantId,
       oldQty: oldCQty,
@@ -1211,7 +1136,7 @@ async function handleMasterEvent(ev) {
       await setQtyOldValue(shopDomain, adminHeaders, vId, realChildQty);
     }
   }
-  // Enviar el webhook con los datos finales
+  // Send the webhook with final data
   console.log("🚀 Calling sendCustomWebhook...");
     await sendCustomWebhook(shopDomain, { 
       variantId: ev.variantId, 
@@ -1237,7 +1162,7 @@ async function handleMasterEvent(ev) {
       const webhookUrl = subscription.customApiUrl;
       console.log(`📡 Sending webhook to: ${webhookUrl}`);
 
-      // Estructura del webhook en JSON
+      // JSON webhook structure
       const payload = {
         masterID: masterData.variantId,
         "master old inventory": masterData.oldQty,
@@ -1253,7 +1178,7 @@ async function handleMasterEvent(ev) {
 
       console.log(`📦 Webhook Payload:`, JSON.stringify(payload, null, 2));
 
-      // Enviar webhook con method POST
+      // Send webhook with POST method
       const response = await fetch(webhookUrl, {
         method: "POST",
         headers: {

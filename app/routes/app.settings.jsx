@@ -318,7 +318,7 @@ export default function AppSettings() {
   }, [actionData]);
 
   return (
-    <Page title="Synclogic Settings">
+    <Page title="Projekt: Stock Control Master Settings">
       <TitleBar title="Settings" />
       {actionData?.error && <Banner status="critical" title="Error">{actionData.error}</Banner>}
       {actionData?.success && <Banner status="success" title="Success">{actionData.message}</Banner>}
@@ -385,7 +385,7 @@ export default function AppSettings() {
                 name="customApiUrl"
                 value={customUrl}
                 onChange={setCustomUrl}
-                helpText="Synclogic will send product updates here in JSON format."
+                helpText="Projekt: Stock Control Master will send product updates here in JSON format."
               />
               <br />
               <Button submit>Save</Button>
