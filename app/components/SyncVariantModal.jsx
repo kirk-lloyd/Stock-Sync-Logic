@@ -788,57 +788,290 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
    * 
    * @param {string} childId - The ID of the variant to add as a child
    */
-  const handleAddChild = async (childId) => {
-    try {
-      // Check if this child is already in the children array
-      if (children.includes(childId)) {
-        setError('This variant is already a child of this master.');
-        return;
-      }
-      
-      // Create updated children array
-      const updatedChildren = [...children, childId];
-      
-      // First, set the parent-master metafield on the child variant
-      await setParentMasterMetafield(childId, variantId);
-      
-      // Then, update the children metafield on the master variant
-      const res = await fetch('/api/update-variant-metafield', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          variantId,
-          namespace: 'projektstocksyncchildren',
-          key: 'childrenkey',
-          value: JSON.stringify(updatedChildren)
-        })
-      });
-      
-      if (!res.ok) {
-        const errText = await res.text();
-        try {
-          const errData = JSON.parse(errText);
-          throw new Error(errData.error || 'Failed to add child');
-        } catch (jsonError) {
-          throw new Error(errText || 'Failed to add child');
-        }
-      }
-      
-      // Update local state
-      setChildren(updatedChildren);
-      
-      // Fetch details for the newly added child
-      await refreshChildData(childId);
-      
-      setSuccess('Child added successfully');
-      
-      return true;
-    } catch (err) {
-      console.error('Error adding child:', err);
-      setError(err.message);
+  /**
+ * Forcibly updates the master's inventory to synchronize with children
+ * First increases by 1 and then decreases by 1 to maintain the original value
+ */
+const forceInventorySync = async () => {
+  try {
+    console.log("START: FORCING INVENTORY SYNCHRONIZATION");
+    
+    // Get the current inventory value
+    const currentInventory = Number(inventory);
+    console.log(`Current inventory: ${currentInventory}`);
+    
+    // FIRST MUTATION: Increment by 1
+    console.log(`FIRST MUTATION: Incrementing from ${currentInventory} to ${currentInventory + 1}`);
+    const incrementResponse = await fetch("/api/update-inventory", {
+      method: "POST",
+      headers: { 
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ 
+        variantId, 
+        newQuantity: currentInventory + 1 
+      })
+    });
+    
+    // Verify response
+    if (!incrementResponse.ok) {
+      const errorText = await incrementResponse.text();
+      console.error("Error in increment:", errorText);
+      throw new Error("Error incrementing inventory: " + errorText);
+    }
+    
+    const incrementResult = await incrementResponse.text();
+    console.log("Increment response:", incrementResult);
+    
+    // Update local state
+    setInventory(String(currentInventory + 1));
+    
+    // Wait to ensure the update is processed
+    console.log("Waiting 3 seconds...");
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
+    // SECOND MUTATION: Return to original value
+    console.log(`SECOND MUTATION: Returning from ${currentInventory + 1} to ${currentInventory}`);
+    const decrementResponse = await fetch("/api/update-inventory", {
+      method: "POST",
+      headers: { 
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ 
+        variantId, 
+        newQuantity: currentInventory 
+      })
+    });
+    
+    // Verify response
+    if (!decrementResponse.ok) {
+      const errorText = await decrementResponse.text();
+      console.error("Error in decrement:", errorText);
+      throw new Error("Error decrementing inventory: " + errorText);
+    }
+    
+    const decrementResult = await decrementResponse.text();
+    console.log("Decrement response:", decrementResult);
+    
+    // Restore local state
+    setInventory(String(currentInventory));
+    
+    console.log("END: INVENTORY SYNCHRONIZATION COMPLETED");
+    return true;
+  } catch (error) {
+    console.error("ERROR IN INVENTORY SYNCHRONIZATION:", error);
+    return false;
+  }
+};
+
+/**
+ * Modifies handleAddChild to call the synchronization function after adding the child
+ */
+const handleAddChild = async (childId) => {
+  try {
+    console.log(`==== START: ADDING CHILD ${childId} ====`);
+    
+    // Check if this child is already in the children array
+    if (children.includes(childId)) {
+      setError('This variant is already a child of this master.');
       return false;
     }
-  };
+    
+    // Create updated children array
+    const updatedChildren = [...children, childId];
+    
+    // First, set the parent-master metafield on the child variant
+    await setParentMasterMetafield(childId, variantId);
+    
+    // Then, update the children metafield on the master variant
+    const res = await fetch('/api/update-variant-metafield', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        variantId,
+        namespace: 'projektstocksyncchildren',
+        key: 'childrenkey',
+        value: JSON.stringify(updatedChildren)
+      })
+    });
+    
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(errText || 'Error adding child');
+    }
+    
+    // Update local state
+    setChildren(updatedChildren);
+    
+    // Get current inventory value
+    const currentInventory = Number(inventory);
+    
+    // Show loading animation
+    setIsAddChildrenModalOpen(false); // Close the add child modal first
+    setShowSuccessAnimation(true);
+    setIsProcessing(true);
+    setProcessingProgress(0);
+    
+    // Start progress animation
+    let secondsElapsed = 0;
+    let progressTimer = setInterval(() => {
+      secondsElapsed++;
+      
+      if (secondsElapsed >= 15) {
+        clearInterval(progressTimer);
+        setProcessingProgress(100);
+      } else {
+        // Calculate progress exactly based on elapsed seconds (0-15)
+        const progress = Math.round((secondsElapsed / 15) * 100);
+        setProcessingProgress(progress);
+      }
+    }, 1000);
+    
+    // First mutation: +1
+    console.log(`Incrementing inventory from ${currentInventory} to ${currentInventory + 1}`);
+    const incrementResponse = await fetch("/api/update-inventory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ 
+        variantId, 
+        newQuantity: currentInventory + 1 
+      })
+    });
+    
+    if (!incrementResponse.ok) {
+      const errorText = await incrementResponse.text();
+      throw new Error("Error incrementing inventory: " + errorText);
+    }
+    
+    // Wait before second mutation
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
+    // Second mutation: -1
+    console.log(`Decrementing inventory from ${currentInventory + 1} to ${currentInventory}`);
+    const decrementResponse = await fetch("/api/update-inventory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ 
+        variantId, 
+        newQuantity: currentInventory 
+      })
+    });
+    
+    if (!decrementResponse.ok) {
+      const errorText = await decrementResponse.text();
+      throw new Error("Error decrementing inventory: " + errorText);
+    }
+    
+    // Wait for the full 15 seconds to complete
+    await new Promise(resolve => setTimeout(resolve, 15000 - 3000)); // Minus 3 seconds already waited
+    
+    // Reload modal data
+    try {
+      console.log("Refreshing modal data...");
+      const refreshRes = await fetch(`/api/sync-product?variantId=${encodeURIComponent(variantId)}`);
+      if (refreshRes.ok) {
+        const refreshData = await refreshRes.json();
+        const v = refreshData.product;
+        
+        setVariantData(v);
+        setTitle(v.title || "");
+        setInventory(String(v.inventoryQuantity || 0));
+        setMaster(v.masterMetafield?.value === "true");
+        
+        // Refresh children data if available
+        if (v.childrenMetafield?.value) {
+          try {
+            const updatedChildren = JSON.parse(v.childrenMetafield.value);
+            setChildren(updatedChildren);
+            
+            // Re-fetch child details
+            const childDetails = {...childrenDetails};
+            const ratios = {...masterRatios};
+            
+            await Promise.all(updatedChildren.map(async (cId) => {
+              try {
+                const childRes = await fetch(`/api/sync-product?variantId=${encodeURIComponent(cId)}`);
+                if (childRes.ok) {
+                  const childData = await childRes.json();
+                  const childProduct = childData.product;
+                  
+                  childDetails[cId] = {
+                    title: childProduct.title || "Unknown",
+                    image: childProduct.image?.originalSrc || childProduct.product?.images?.edges?.[0]?.node?.originalSrc || null,
+                    inventory: childProduct.inventoryQuantity || 0,
+                    sku: childProduct.sku || ""
+                  };
+                  
+                  // Extract ratio data
+                  let qtyValue = null;
+                  if (childProduct.ratioMetafield?.value) {
+                    qtyValue = childProduct.ratioMetafield.value;
+                  } else if (Array.isArray(childProduct.metafields)) {
+                    const qtyMeta = childProduct.metafields.find(
+                      meta => meta.namespace === "projektstocksyncqtymanagement" && meta.key === "qtymanagement"
+                    );
+                    if (qtyMeta) qtyValue = qtyMeta.value;
+                  } else if (childProduct.metafields?.edges) {
+                    const qtyMetaEdge = childProduct.metafields.edges.find(
+                      edge => edge.node?.namespace === "projektstocksyncqtymanagement" && 
+                             edge.node?.key === "qtymanagement"
+                    );
+                    if (qtyMetaEdge?.node?.value) qtyValue = qtyMetaEdge.node.value;
+                  }
+                  
+                  if (qtyValue !== null) {
+                    try {
+                      const parsedValue = parseInt(qtyValue, 10);
+                      if (!isNaN(parsedValue) && parsedValue > 0) {
+                        ratios[cId] = parsedValue;
+                      }
+                    } catch (e) { /* ignore parsing errors */ }
+                  }
+                }
+              } catch (err) {
+                console.error(`Error refreshing child ${cId}:`, err);
+              }
+            }));
+            
+            setChildrenDetails(childDetails);
+            setMasterRatios(ratios);
+          } catch (e) {
+            console.error("Error parsing updated children data:", e);
+          }
+        }
+        
+        // Call parent component's update callback
+        onUpdate(v);
+      }
+    } catch (refreshError) {
+      console.error("Error refreshing modal data:", refreshError);
+    }
+    
+    // Complete the process
+    clearInterval(progressTimer);
+    setProcessingProgress(100);
+    
+    // Show completion for 2 seconds
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Reset UI state
+    setIsProcessing(false);
+    setShowSuccessAnimation(false);
+    setSuccess("Child added and synchronised successfully");
+    
+    console.log(`==== END: CHILD ADDITION COMPLETED ====`);
+    return true;
+    
+  } catch (err) {
+    // Reset UI state on error
+    setIsProcessing(false);
+    setShowSuccessAnimation(false);
+    setProcessingProgress(0);
+    console.error("Error adding child or synchronising inventory:", err);
+    setError(err.message);
+    return false;
+  }
+};
 
   /**
    * Removes a child variant from the master variant
@@ -896,6 +1129,7 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
    */
   async function handleUpdateMasterRatio(childId, newRatio) {
     try {
+      console.log(`==== START: RATIO UPDATE FOR ${childId} ====`);
       setError(null);
       
       // Validate input - check if empty
@@ -906,7 +1140,7 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
       // Validate input - check if it's a positive number
       const ratioNumber = parseInt(newRatio, 10);
       if (isNaN(ratioNumber) || ratioNumber < 1) {
-        throw new Error("Ratio must be a positive integer");
+        throw new Error("Ratio must be a positive whole number");
       }
       
       // Update in state
@@ -915,17 +1149,7 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
         [childId]: ratioNumber
       }));
       
-      // Detailed log for debugging
-      console.log("=== START MASTER RATIO UPDATE ===");
-      console.log("Sending API request to update ratio:", {
-        variantId: childId,
-        namespace: "projektstocksyncqtymanagement",
-        key: "qtymanagement",
-        value: String(ratioNumber),
-        type: "number_integer"
-      });
-      
-      // Call API to update the metafield with cache-busting
+      // Call API to update the metafield
       const timestamp = new Date().getTime();
       const res = await fetch(`/api/update-variant-metafield?t=${timestamp}`, {
         method: "POST",
@@ -942,49 +1166,170 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
         }),
       });
       
-      // Log the raw response for debugging
-      const responseText = await res.text();
-      console.log("API Response raw text:", responseText);
-      
-      // Try to parse the response as JSON
-      let responseData = null;
-      try {
-        if (responseText) {
-          responseData = JSON.parse(responseText);
-          console.log("API Response parsed JSON:", responseData);
-        }
-      } catch (e) {
-        console.log("Could not parse response as JSON");
-      }
-      
       if (!res.ok) {
-        try {
-          const errData = responseData || {};
-          throw new Error(errData.error || "Failed to update master ratio");
-        } catch (jsonError) {
-          throw new Error(responseText || "Failed to update master ratio");
-        }
+        const responseText = await res.text();
+        throw new Error(responseText || "Error updating ratio");
       }
       
-      // Show success message
-      setSuccess(`Updated ratio for ${childrenDetails[childId]?.title || childId}`);
+      // Get current inventory value
+      const currentInventory = Number(inventory);
       
-      console.log("API update completed successfully, refreshing data...");
+      // Show loading animation
+      setShowSuccessAnimation(true);
+      setIsProcessing(true);
+      setProcessingProgress(0);
       
-      // Add a small delay before refreshing to allow the change to propagate
-      setTimeout(async () => {
-        // Refresh data to get the updated metafield value
-        await refreshChildData(childId);
-        console.log("=== END MASTER RATIO UPDATE ===");
-      }, 500);
+      // Start progress animation
+      let progressTimer = setInterval(() => {
+        setProcessingProgress(prev => {
+          if (prev >= 100) {
+            clearInterval(progressTimer);
+            return 100;
+          }
+          return prev + (100/15);  // Complete in 15 seconds
+        });
+      }, 1000);
       
-      // Clear success message after 3 seconds
-      setTimeout(() => {
-        setSuccess(null);
-      }, 3000);
+      // First mutation: +1
+      console.log(`Incrementing inventory from ${currentInventory} to ${currentInventory + 1}`);
+      const incrementResponse = await fetch("/api/update-inventory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          variantId, 
+          newQuantity: currentInventory + 1 
+        })
+      });
+      
+      if (!incrementResponse.ok) {
+        const errorText = await incrementResponse.text();
+        throw new Error("Error incrementing inventory: " + errorText);
+      }
+      
+      // Wait before second mutation
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      // Second mutation: -1
+      console.log(`Decrementing inventory from ${currentInventory + 1} to ${currentInventory}`);
+      const decrementResponse = await fetch("/api/update-inventory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          variantId, 
+          newQuantity: currentInventory 
+        })
+      });
+      
+      if (!decrementResponse.ok) {
+        const errorText = await decrementResponse.text();
+        throw new Error("Error decrementing inventory: " + errorText);
+      }
+      
+      // Wait for the full 15 seconds to complete
+      await new Promise(resolve => setTimeout(resolve, 15000 - 3000)); // Minus 3 seconds already waited
+      
+      // Reload modal data
+      try {
+        console.log("Refreshing modal data...");
+        const refreshRes = await fetch(`/api/sync-product?variantId=${encodeURIComponent(variantId)}`);
+        if (refreshRes.ok) {
+          const refreshData = await refreshRes.json();
+          const v = refreshData.product;
+          
+          setVariantData(v);
+          setTitle(v.title || "");
+          setInventory(String(v.inventoryQuantity || 0));
+          setMaster(v.masterMetafield?.value === "true");
+          
+          // Refresh children data if available
+          if (v.childrenMetafield?.value) {
+            try {
+              const updatedChildren = JSON.parse(v.childrenMetafield.value);
+              setChildren(updatedChildren);
+              
+              // Re-fetch child details
+              const childDetails = {};
+              const ratios = {};
+              
+              await Promise.all(updatedChildren.map(async (cId) => {
+                try {
+                  const childRes = await fetch(`/api/sync-product?variantId=${encodeURIComponent(cId)}`);
+                  if (childRes.ok) {
+                    const childData = await childRes.json();
+                    const childProduct = childData.product;
+                    
+                    childDetails[cId] = {
+                      title: childProduct.title || "Unknown",
+                      image: childProduct.image?.originalSrc || childProduct.product?.images?.edges?.[0]?.node?.originalSrc || null,
+                      inventory: childProduct.inventoryQuantity || 0,
+                      sku: childProduct.sku || ""
+                    };
+                    
+                    // Extract ratio data
+                    let qtyValue = null;
+                    if (childProduct.ratioMetafield?.value) {
+                      qtyValue = childProduct.ratioMetafield.value;
+                    } else if (Array.isArray(childProduct.metafields)) {
+                      const qtyMeta = childProduct.metafields.find(
+                        meta => meta.namespace === "projektstocksyncqtymanagement" && meta.key === "qtymanagement"
+                      );
+                      if (qtyMeta) qtyValue = qtyMeta.value;
+                    } else if (childProduct.metafields?.edges) {
+                      const qtyMetaEdge = childProduct.metafields.edges.find(
+                        edge => edge.node?.namespace === "projektstocksyncqtymanagement" && 
+                               edge.node?.key === "qtymanagement"
+                      );
+                      if (qtyMetaEdge?.node?.value) qtyValue = qtyMetaEdge.node.value;
+                    }
+                    
+                    if (qtyValue !== null) {
+                      try {
+                        const parsedValue = parseInt(qtyValue, 10);
+                        if (!isNaN(parsedValue) && parsedValue > 0) {
+                          ratios[cId] = parsedValue;
+                        }
+                      } catch (e) { /* ignore parsing errors */ }
+                    }
+                  }
+                } catch (err) {
+                  console.error(`Error refreshing child ${cId}:`, err);
+                }
+              }));
+              
+              setChildrenDetails(childDetails);
+              setMasterRatios(ratios);
+            } catch (e) {
+              console.error("Error parsing updated children data:", e);
+            }
+          }
+          
+          // Call parent component's update callback
+          onUpdate(v);
+        }
+      } catch (refreshError) {
+        console.error("Error refreshing modal data:", refreshError);
+      }
+      
+      // Complete the process
+      clearInterval(progressTimer);
+      setProcessingProgress(100);
+      
+      // Show completion for 2 seconds
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Reset UI state
+      setIsProcessing(false);
+      setShowSuccessAnimation(false);
+      setSuccess("Ratio updated and synchronised successfully");
+      
+      console.log(`==== END: RATIO UPDATE COMPLETED ====`);
       
     } catch (err) {
-      console.error("Error updating ratio:", err);
+      // Reset UI state on error
+      setIsProcessing(false);
+      setShowSuccessAnimation(false);
+      setProcessingProgress(0);
+      console.error("Error updating ratio or synchronising inventory:", err);
       setError(err.message);
     }
   }
@@ -1808,15 +2153,6 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
                       </EmptyState>
                     )}
                 </div>
-                <Banner
-                      title="Inventory Synchronisation Notice"
-                      status="info"
-                      tone="highlight"
-                    >
-                      <p>
-                      Please be advised that the inventory of both master and children variants will automatically update when inventory adjustments occur. For manual synchronisation, you'll need to modify the master quantity and select "Save Changes" to properly update the inventory across all linked variants.
-                      </p>
-                    </Banner>
               </Card>
               )}
             </BlockStack>
