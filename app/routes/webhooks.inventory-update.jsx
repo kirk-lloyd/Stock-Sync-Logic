@@ -29,6 +29,15 @@ import https from 'https';
  *
  * 5) Standard concurrency locks, dedup checks, and predicted update logic
  *    to avoid infinite loops or repeated partial processing.
+ *
+ * 6) Batch inventory updates to significantly reduce API calls and improve
+ *    performance during high-volume update periods.
+ *
+ * 7) In-memory caching system for metadata that changes infrequently,
+ *    reducing redundant API calls.
+ *
+ * 8) Parallel processing of independent operations using Promise.all()
+ *    to reduce overall processing time.
  * ------------------------------------------------------------------
  */
 
@@ -100,6 +109,59 @@ function markPredictedUpdate(pKey) {
 
 function hasPredictedUpdate(pKey) {
   return predictedUpdates.has(pKey);
+}
+
+/*
+ * ------------------------------------------------------------------
+ * CACHE IMPLEMENTATION FOR METAFIELDS AND VARIANT-INVENTORY RELATIONSHIPS
+ * ------------------------------------------------------------------
+ * Reduces API calls for information that doesn't change frequently
+ */
+
+// Caches with expiration time
+const metafieldCache = new Map();
+const variantInventoryCache = new Map();
+const qtyManagementCache = new Map();
+const childrenCache = new Map();
+
+// Generic cache function to store values with TTL
+function setCacheValue(cache, key, value, ttlMs = 60000) { // 1 minute default
+  cache.set(key, {
+    value,
+    expiry: Date.now() + ttlMs
+  });
+  
+  // Optional: Automatic cleanup after TTL
+  setTimeout(() => {
+    const entry = cache.get(key);
+    // Only remove if this entry hasn't been updated
+    if (entry && entry.expiry <= Date.now()) {
+      cache.delete(key);
+    }
+  }, ttlMs);
+}
+
+function getCacheValue(cache, key) {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  
+  if (entry.expiry <= Date.now()) {
+    cache.delete(key);
+    return null;
+  }
+  
+  return entry.value;
+}
+
+// Function to invalidate caches when relationship changes are detected
+function invalidateRelationshipCaches(shopDomain, variantId) {
+  const cacheKey = `${shopDomain}:${variantId}`;
+  
+  // Invalidate related caches
+  childrenCache.delete(cacheKey);
+  metafieldCache.delete(cacheKey);
+  
+  console.log(`🧹 Cache invalidated for ${cacheKey}`);
 }
 
 /*
@@ -299,6 +361,102 @@ async function setInventoryQuantity(
 
 /*
  * ------------------------------------------------------------------
+ * NEW FUNCTION: BATCH INVENTORY UPDATE
+ * ------------------------------------------------------------------
+ * This function updates multiple inventory levels in a single API
+ * call to reduce latency and improve performance
+ */
+async function setInventoryQuantityBatch(
+  shopDomain,
+  adminHeaders,
+  itemsToUpdate, // Array of {inventoryItemId, locationId, quantity}
+  internal = false
+) {
+  if (!itemsToUpdate.length) return null;
+  
+  // Optional reference link to differentiate internal vs external updates
+  const MY_APP_URL = process.env.MY_APP_URL || "https://your-app-url.com";
+  const referenceDocumentUriValue = internal
+    ? `${MY_APP_URL}/by_app/internal-batch-update`
+    : `${MY_APP_URL}/by_app/external-batch-update`;
+
+  // Normalise the inventory IDs and mark updates as predicted
+  const quantities = itemsToUpdate.map(item => {
+    let cleanInventoryItemId;
+    if (typeof item.inventoryItemId === "string") {
+      if (item.inventoryItemId.startsWith("gid://shopify/InventoryItem/")) {
+        cleanInventoryItemId = item.inventoryItemId;
+      } else {
+        cleanInventoryItemId = `gid://shopify/InventoryItem/${item.inventoryItemId}`;
+      }
+    } else {
+      cleanInventoryItemId = `gid://shopify/InventoryItem/${item.inventoryItemId}`;
+    }
+    
+    // Mark as predicted update
+    const pKey = buildPredictedKey(
+      cleanInventoryItemId.replace("gid://shopify/InventoryItem/", ""),
+      item.locationId,
+      item.quantity
+    );
+    markPredictedUpdate(pKey);
+    
+    return {
+      inventoryItemId: cleanInventoryItemId,
+      locationId: `gid://shopify/Location/${item.locationId}`,
+      quantity: item.quantity
+    };
+  });
+  
+  console.log(`🔧 setInventoryQuantityBatch => Updating ${quantities.length} items in batch`);
+
+  const response = await fetch(
+    `https://${shopDomain}/admin/api/2024-10/graphql.json`,
+    {
+      method: "POST",
+      headers: {
+        ...adminHeaders,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: `
+          mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
+            inventorySetQuantities(input: $input) {
+              inventoryAdjustmentGroup {
+                id
+              }
+              userErrors {
+                field
+                message
+              }
+            }
+          }
+        `,
+        variables: {
+          input: {
+            name: "on_hand",
+            reason: "correction",
+            ignoreCompareQuantity: true,
+            referenceDocumentUri: referenceDocumentUriValue,
+            quantities: quantities,
+          },
+        },
+      }),
+    }
+  );
+
+  const data = await response.json();
+  if (data.errors) {
+    console.error("❌ setInventoryQuantityBatch =>", data.errors);
+    return null;
+  } else {
+    console.log(`✅ Inventory batch updated => ${quantities.length} items`);
+    return data;
+  }
+}
+
+/*
+ * ------------------------------------------------------------------
  * 3.1) GET/SET QTYOLD METAFIELD ON SHOPIFY (FOR REFERENCE)
  * ------------------------------------------------------------------
  * We still update the 'qtyold' metafield in Shopify, but do not rely
@@ -391,6 +549,83 @@ async function setQtyOldValue(shopDomain, adminHeaders, variantId, newQty) {
 
 /*
  * ------------------------------------------------------------------
+ * OPTIMISED FUNCTION => BATCH UPDATE METAFIELDS
+ * ------------------------------------------------------------------
+ * Updates multiple metafields in a single operation
+ */
+async function batchUpdateMetafields(shopDomain, adminHeaders, updates) {
+  // updates = [{ownerId, namespace, key, type, value}, ...]
+  
+  if (!updates || updates.length === 0) return null;
+  
+  const mutation = `
+    mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        metafields {
+          id
+          namespace
+          key
+          value
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+  
+  const resp = await fetch(
+    `https://${shopDomain}/admin/api/2024-10/graphql.json`,
+    {
+      method: "POST",
+      headers: {
+        ...adminHeaders,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: mutation,
+        variables: { metafields: updates }
+      }),
+    }
+  );
+  
+  const data = await resp.json();
+  if (data.errors) {
+    console.error("❌ batchUpdateMetafields => GraphQL errors:", data.errors);
+    return null;
+  }
+  
+  if (data.data?.metafieldsSet?.userErrors?.length) {
+    console.error("❌ batchUpdateMetafields => userErrors:", data.data.metafieldsSet.userErrors);
+    return null;
+  }
+  
+  console.log(`✅ Updated ${updates.length} metafields in batch`);
+  return data;
+}
+
+/*
+ * ------------------------------------------------------------------
+ * OPTIMISED FUNCTION => BATCH UPDATE QTYOLD FOR MULTIPLE VARIANTS
+ * ------------------------------------------------------------------
+ * Updates qtyold in Shopify metafields for multiple variants
+ */
+async function setQtyOldValueBatch(shopDomain, adminHeaders, updates) {
+  // updates = [{variantId, newQty}, ...]
+  const metafieldUpdates = updates.map(update => ({
+    ownerId: update.variantId,
+    namespace: "projektstocksyncqtyold",
+    key: "qtyold",
+    type: "number_integer",
+    value: String(update.newQty)
+  }));
+  
+  return batchUpdateMetafields(shopDomain, adminHeaders, metafieldUpdates);
+}
+
+/*
+ * ------------------------------------------------------------------
  * 3.2) GET/SET QTYOLD FROM PRISMA DB
  * ------------------------------------------------------------------
  * We read/write oldQty from our Stockdb model instead of the Shopify
@@ -450,6 +685,42 @@ async function setQtyOldValueDB(shopDomain, variantId, newQty) {
 
 /*
  * ------------------------------------------------------------------
+ * OPTIMISED FUNCTION => BATCH UPDATE QTYOLD IN DB FOR MULTIPLE VARIANTS
+ * ------------------------------------------------------------------
+ * Updates oldQuantity in Prisma DB for multiple variants
+ */
+async function setQtyOldValueDBBatch(shopDomain, updates) {
+  // updates = [{variantId, newQty}, ...]
+  const dbOperations = updates.map(update => {
+    const normalisedId = normaliseVariantId(update.variantId);
+    
+    return prisma.stockdb.upsert({
+      where: {
+        shop_productVariantId: {
+          shop: shopDomain,
+          productVariantId: normalisedId,
+        }
+      },
+      update: { oldQuantity: update.newQty },
+      create: {
+        shop: shopDomain,
+        productVariantId: normalisedId,
+        oldQuantity: update.newQty,
+        title: "Unknown",
+        productId: "unknown",
+        productHandle: "unknown",
+      }
+    });
+  });
+  
+  // Execute all DB operations in a transaction
+  const results = await prisma.$transaction(dbOperations);
+  console.log(`✅ Updated ${results.length} oldQuantity entries in DB`);
+  return results;
+}
+
+/*
+ * ------------------------------------------------------------------
  * 4) DETERMINE IF THIS ITEM IS MASTER OR CHILD
  * ------------------------------------------------------------------
  * OPTIMISED VERSION: Directly checks the variant's metafields
@@ -459,6 +730,14 @@ async function setQtyOldValueDB(shopDomain, variantId, newQty) {
  */
 async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
   console.log(`🔍 getMasterChildInfo => inventory item: ${inventoryItemId}`);
+
+  // Check cache for this inventory item 
+  const cacheKey = `${shopDomain}:inv:${inventoryItemId}`;
+  const cachedInfo = getCacheValue(metafieldCache, cacheKey);
+  if (cachedInfo !== null) {
+    console.log("✅ Retrieved MASTER/CHILD info from cache");
+    return cachedInfo;
+  }
 
   // 1) Find the variant (if any) associated with the inventory item
   const response = await fetch(
@@ -517,6 +796,8 @@ async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
   );
   const isMaster = masterField?.node?.value?.trim().toLowerCase() === "true";
 
+  let result = null;
+
   if (isMaster) {
     console.log("✅ This variant is designated as MASTER.");
     const childrenKey = metafields.find(
@@ -530,62 +811,68 @@ async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
         console.error("❌ Error parsing 'childrenkey' =>", err);
       }
     }
-    return {
+    result = {
       isMaster: true,
       variantId: variantNode.id,
       inventoryItemId,
       sku: variantNode.sku || '',
       children: childrenIds,
     };
-  }
-
-  // Check if this variant is a CHILD (using the parentmaster metafield)
-  const parentMasterField = metafields.find(
-    (m) => m.node.namespace === "projektstocksyncparentmaster" && m.node.key === "parentmaster"
-  );
-  
-  if (parentMasterField?.node?.value) {
-    console.log("✅ This variant is designated as CHILD.");
-    let masterVariantId;
-    
-    try {
-      // The parentmaster field should contain the master variant ID
-      const parsedValue = JSON.parse(parentMasterField.node.value);
-      masterVariantId = Array.isArray(parsedValue) && parsedValue.length > 0 ? parsedValue[0] : null;
-    } catch (err) {
-      console.error("❌ Error parsing 'parentmaster' metafield =>", err);
-      return null;
-    }
-    
-    if (!masterVariantId) {
-      console.log("❌ No valid master variant ID found in 'parentmaster' metafield.");
-      return null;
-    }
-    
-    // Get the master's inventory item ID
-    const masterInventoryItemId = await getInventoryItemIdFromVariantId(
-      shopDomain, 
-      adminHeaders, 
-      masterVariantId
+  } else {
+    // Check if this variant is a CHILD (using the parentmaster metafield)
+    const parentMasterField = metafields.find(
+      (m) => m.node.namespace === "projektstocksyncparentmaster" && m.node.key === "parentmaster"
     );
     
-    if (!masterInventoryItemId) {
-      console.error("❌ Could not find inventory item for master variant:", masterVariantId);
-      return null;
+    if (parentMasterField?.node?.value) {
+      console.log("✅ This variant is designated as CHILD.");
+      let masterVariantId;
+      
+      try {
+        // The parentmaster field should contain the master variant ID
+        const parsedValue = JSON.parse(parentMasterField.node.value);
+        masterVariantId = Array.isArray(parsedValue) && parsedValue.length > 0 ? parsedValue[0] : null;
+      } catch (err) {
+        console.error("❌ Error parsing 'parentmaster' metafield =>", err);
+        return null;
+      }
+      
+      if (!masterVariantId) {
+        console.log("❌ No valid master variant ID found in 'parentmaster' metafield.");
+        return null;
+      }
+      
+      // Get the master's inventory item ID
+      const masterInventoryItemId = await getInventoryItemIdFromVariantIdCached(
+        shopDomain, 
+        adminHeaders, 
+        masterVariantId
+      );
+      
+      if (!masterInventoryItemId) {
+        console.error("❌ Could not find inventory item for master variant:", masterVariantId);
+        return null;
+      }
+      
+      result = {
+        isChild: true,
+        childVariantId: variantNode.id,
+        childSku: variantNode.sku || '',
+        masterVariantId: masterVariantId,
+        masterInventoryItemId: masterInventoryItemId,
+        inventoryItemId,
+      };
+    } else {
+      console.log("❌ No MASTER/CHILD relationship detected for this variant.");
     }
-    
-    return {
-      isChild: true,
-      childVariantId: variantNode.id,
-      childSku: variantNode.sku || '',
-      masterVariantId: masterVariantId,
-      masterInventoryItemId: masterInventoryItemId,
-      inventoryItemId,
-    };
   }
 
-  console.log("❌ No MASTER/CHILD relationship detected for this variant.");
-  return null;
+  if (result) {
+    // Cache this result for 5 minutes
+    setCacheValue(metafieldCache, cacheKey, result, 5 * 60 * 1000);
+  }
+
+  return result;
 }
 
 /*
@@ -595,6 +882,13 @@ async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
  * childDivisor=1 => the child quantity always matches the MASTER.
  */
 async function getVariantQtyManagement(shopDomain, adminHeaders, variantId) {
+  const cacheKey = `${shopDomain}:qm:${variantId}`;
+  const cachedValue = getCacheValue(qtyManagementCache, cacheKey);
+  
+  if (cachedValue !== null) {
+    return cachedValue;
+  }
+  
   const query = `
     query GetVariantQtyManagement($variantId: ID!) {
       productVariant(id: $variantId) {
@@ -617,7 +911,12 @@ async function getVariantQtyManagement(shopDomain, adminHeaders, variantId) {
   );
   const data = await resp.json();
   const valStr = data?.data?.productVariant?.metafield?.value;
-  return valStr ? parseInt(valStr, 10) : 1;
+  const result = valStr ? parseInt(valStr, 10) : 1;
+  
+  // Cache for 5 minutes as this value rarely changes
+  setCacheValue(qtyManagementCache, cacheKey, result, 5 * 60 * 1000);
+  
+  return result;
 }
 
 /*
@@ -628,6 +927,14 @@ async function getVariantQtyManagement(shopDomain, adminHeaders, variantId) {
  * without searching through all products.
  */
 async function getChildrenInventoryItems(shopDomain, adminHeaders, masterVariantId) {
+  const cacheKey = `${shopDomain}:children:${masterVariantId}`;
+  const cachedValue = getCacheValue(childrenCache, cacheKey);
+  
+  if (cachedValue !== null) {
+    console.log(`✅ Retrieved ${cachedValue.length} children from cache for ${masterVariantId}`);
+    return cachedValue;
+  }
+  
   const query = `
     query GetProductVariant($variantId: ID!) {
       productVariant(id: $variantId) {
@@ -733,7 +1040,11 @@ async function getChildrenInventoryItems(shopDomain, adminHeaders, masterVariant
     }
   }
   
-  console.log("✅ Final children => MASTER:", JSON.stringify(foundChildren, null, 2));
+  console.log(`✅ Final children => MASTER: found ${foundChildren.length} children`);
+  
+  // Cache the result for 10 minutes
+  setCacheValue(childrenCache, cacheKey, foundChildren, 10 * 60 * 1000);
+  
   return foundChildren;
 }
 
@@ -778,6 +1089,14 @@ async function processWithDeferred(key, initialUpdate, processUpdate) {
  * location. If not found, we attempt to activate the item in that location.
  */
 async function getCurrentAvailableQuantity(shopDomain, adminHeaders, inventoryItemId, locationId) {
+  // Check cache first
+  const cacheKey = `${shopDomain}:qty:${inventoryItemId}:${locationId}`;
+  // Short TTL for quantities since they change frequently
+  const cachedQty = getCacheValue(metafieldCache, cacheKey);
+  if (cachedQty !== null) {
+    return cachedQty;
+  }
+  
   async function doQuery(iid, locId) {
     const query = `
       query getInventoryLevels($inventoryItemId: ID!) {
@@ -832,7 +1151,11 @@ async function getCurrentAvailableQuantity(shopDomain, adminHeaders, inventoryIt
   }
 
   let qty = await doQuery(finalId, locationId);
-  if (qty !== null) return qty;
+  if (qty !== null) {
+    // Cache for a short time (15 seconds)
+    setCacheValue(metafieldCache, cacheKey, qty, 15 * 1000);
+    return qty;
+  }
 
   console.log(`⚠️ This item or location was not found => attempting activation => ${finalId}, loc:${locationId}`);
   const numericId = finalId.replace("gid://shopify/InventoryItem/", "");
@@ -847,6 +1170,9 @@ async function getCurrentAvailableQuantity(shopDomain, adminHeaders, inventoryIt
   if (qty === null) {
     return 0;
   }
+  
+  // Cache for a short time after activation
+  setCacheValue(metafieldCache, cacheKey, qty, 15 * 1000);
   return qty;
 }
 
@@ -888,6 +1214,29 @@ async function getInventoryItemIdFromVariantId(shopDomain, adminHeaders, variant
     return null;
   }
   return itemId.replace("gid://shopify/InventoryItem/", "");
+}
+
+/*
+ * ------------------------------------------------------------------
+ * CACHED VERSION OF getInventoryItemIdFromVariantId
+ * ------------------------------------------------------------------
+ */
+async function getInventoryItemIdFromVariantIdCached(shopDomain, adminHeaders, variantId) {
+  const cacheKey = `${shopDomain}:varInv:${variantId}`;
+  const cachedValue = getCacheValue(variantInventoryCache, cacheKey);
+  
+  if (cachedValue !== null) {
+    return cachedValue;
+  }
+  
+  const result = await getInventoryItemIdFromVariantId(shopDomain, adminHeaders, variantId);
+  
+  if (result) {
+    // Cache for 60 minutes since variant-inventory relationship rarely changes
+    setCacheValue(variantInventoryCache, cacheKey, result, 60 * 60 * 1000);
+  }
+  
+  return result;
 }
 
 /*
@@ -961,6 +1310,7 @@ async function processAggregatorEvents(comboKey) {
 /**
  * CHILD => difference-based => newMaster = masterOld + (childDiff * childDivisor)
  * Then recalc siblings => if childDivisor=1 => child's qty = MASTER exactly
+ * Optimised version with batch updates
  */
 async function handleChildEvent(ev) {
   console.log(
@@ -988,77 +1338,108 @@ async function handleChildEvent(ev) {
   const newMasterQty = masterOldQty + scaledDiff;
   console.log(`newMasterQty => ${newMasterQty}`);
 
-  // 1) Update the CHILD's quantity in Shopify
-  await setInventoryQuantity(
-    shopDomain,
-    adminHeaders,
-    ev.inventoryItemId,
-    ev.locationId,
-    ev.newQty
-  );
+  // Array for batch updates
+  const batchUpdates = [];
+  
+  // 1) First add the CHILD that initiated this event
+  batchUpdates.push({
+    inventoryItemId: ev.inventoryItemId,
+    locationId: ev.locationId,
+    quantity: ev.newQty
+  });
 
-  // 2) If MASTER's qty has changed, update it
-  if (newMasterQty !== masterOldQty) {
-    await setInventoryQuantity(
-      shopDomain,
-      adminHeaders,
-      ev.masterInventoryItemId,
-      ev.locationId,
-      newMasterQty,
-      true
-    );
+  // 2) If MASTER's qty has changed, add it to the batch
+  let masterNeedsUpdate = newMasterQty !== masterOldQty;
+  if (masterNeedsUpdate) {
+    batchUpdates.push({
+      inventoryItemId: ev.masterInventoryItemId,
+      locationId: ev.locationId,
+      quantity: newMasterQty
+    });
   }
 
-  // 3) Recalculate siblings => if childDivisor=1 => child = MASTER
+  // 3) Get all children for recalculation
   const siblings = await getChildrenInventoryItems(shopDomain, adminHeaders, ev.masterVariantId);
-  const finalMasterQty = await getCurrentAvailableQuantity(
-    shopDomain,
-    adminHeaders,
-    ev.masterInventoryItemId,
-    ev.locationId
-  );
-
+  
+  // Set to track variants that have been updated
   const updatedVariants = new Set();
   updatedVariants.add(ev.childVariantId);
-  if (newMasterQty !== masterOldQty) {
+  if (masterNeedsUpdate) {
     updatedVariants.add(ev.masterVariantId);
   }
 
-  for (const s of siblings) {
-    // Skip the triggering child
-    const sid = s.inventoryItemId.replace("gid://shopify/InventoryItem/", "");
-    if (sid === String(ev.inventoryItemId)) {
-      continue;
-    }
-    const sDivisor = await getVariantQtyManagement(shopDomain, adminHeaders, s.variantId);
+  // Calculate the final master quantity (might change after update)
+  // Note: If the batch update already includes the master, we could use newMasterQty directly
+  const finalMasterQty = masterNeedsUpdate ? 
+    newMasterQty : 
+    await getCurrentAvailableQuantity(
+      shopDomain,
+      adminHeaders,
+      ev.masterInventoryItemId,
+      ev.locationId
+    );
 
-    let newSQty;
-    if (sDivisor === 1) {
-      // always match MASTER
-      newSQty = finalMasterQty;
-    } else {
-      newSQty = Math.floor(finalMasterQty / (sDivisor || 1));
-    }
+  // Collect data from all siblings in parallel
+  const siblingData = await Promise.all(
+    siblings.map(async (sibling) => {
+      const sid = sibling.inventoryItemId.replace("gid://shopify/InventoryItem/", "");
+      // Skip the child that triggered the event
+      if (sid === String(ev.inventoryItemId)) {
+        return null;
+      }
+      
+      const sDivisor = await getVariantQtyManagement(shopDomain, adminHeaders, sibling.variantId);
+      const oldSQty = await getCurrentAvailableQuantity(shopDomain, adminHeaders, sid, ev.locationId);
+      
+      let newSQty;
+      if (sDivisor === 1) {
+        // always match MASTER
+        newSQty = finalMasterQty;
+      } else {
+        newSQty = Math.floor(finalMasterQty / (sDivisor || 1));
+      }
+      
+      return {
+        sibling,
+        sid,
+        oldSQty,
+        newSQty,
+        needsUpdate: newSQty !== oldSQty
+      };
+    })
+  );
 
-    const oldSQty = await getCurrentAvailableQuantity(shopDomain, adminHeaders, sid, ev.locationId);
-    if (newSQty !== oldSQty) {
-      console.log(`Sibling => old:${oldSQty}, new:${newSQty}, divisor:${sDivisor}`);
-      await setInventoryQuantity(shopDomain, adminHeaders, sid, ev.locationId, newSQty, true);
-      updatedVariants.add(s.variantId);
+  // Add siblings that need updates to the batch
+  for (const data of siblingData) {
+    if (data && data.needsUpdate) {
+      batchUpdates.push({
+        inventoryItemId: data.sid,
+        locationId: ev.locationId,
+        quantity: data.newSQty
+      });
+      updatedVariants.add(data.sibling.variantId);
+      console.log(`Sibling => old:${data.oldSQty}, new:${data.newSQty}`);
     }
   }
 
-  // 4) Update qtyold (both in DB and the Shopify metafield) for all relevant variants
-  for (const vid of updatedVariants) {
-    let finalQty = 0;
+  // Perform the batch update of all inventories
+  if (batchUpdates.length > 0) {
+    await setInventoryQuantityBatch(shopDomain, adminHeaders, batchUpdates, true);
+  }
+
+  // 4) Update qtyold in parallel for all relevant variants
+  const qtyOldUpdates = Array.from(updatedVariants).map(async (vid) => {
+    let finalQty;
+    
     if (vid === ev.childVariantId) {
       finalQty = ev.newQty;
     } else if (vid === ev.masterVariantId) {
       finalQty = newMasterQty;
     } else {
       // A sibling => retrieve final post-update
-      const siblingInvId = await getInventoryItemIdFromVariantId(shopDomain, adminHeaders, vid);
-      if (!siblingInvId) continue;
+      const siblingInvId = await getInventoryItemIdFromVariantIdCached(shopDomain, adminHeaders, vid);
+      if (!siblingInvId) return;
+      
       const realQty = await getCurrentAvailableQuantity(
         shopDomain,
         adminHeaders,
@@ -1068,17 +1449,21 @@ async function handleChildEvent(ev) {
       finalQty = realQty;
     }
 
-    // Write new oldQty to the DB
-    await setQtyOldValueDB(shopDomain, vid, finalQty);
+    // Update oldQty in DB and Shopify in parallel
+    return Promise.all([
+      setQtyOldValueDB(shopDomain, vid, finalQty),
+      setQtyOldValue(shopDomain, adminHeaders, vid, finalQty)
+    ]);
+  });
 
-    // Also update the metafield (for reference only)
-    await setQtyOldValue(shopDomain, adminHeaders, vid, finalQty);
-  }
+  // Wait for all qtyold updates to complete
+  await Promise.all(qtyOldUpdates);
 }
 
 /**
  * MASTER => recalc children => if childDivisor=1 => child=MASTER,
  * else floor(MASTER / childDivisor)
+ * Optimised version using batch updates
  */
 async function handleMasterEvent(ev) {
   const { shopDomain, adminHeaders } = ev;
@@ -1091,60 +1476,104 @@ async function handleMasterEvent(ev) {
     ev.inventoryItemId,
     ev.locationId
   );
+  
+  // Array for all inventory updates (master + children)
+  const batchUpdates = [];
+  const updatedVariants = new Set();
+  updatedVariants.add(ev.variantId);
+  
+  // If master needs update, add to batch
   if (shopMasterQty !== ev.newQty) {
-    await setInventoryQuantity(shopDomain, adminHeaders, ev.inventoryItemId, ev.locationId, ev.newQty);
+    batchUpdates.push({
+      inventoryItemId: ev.inventoryItemId,
+      locationId: ev.locationId,
+      quantity: ev.newQty
+    });
   }
 
   // Recalculate children's inventory
   const children = await getChildrenInventoryItems(shopDomain, adminHeaders, ev.variantId);
-  const updatedVariants = new Set();
-  updatedVariants.add(ev.variantId);
-
   let childrenData = [];
 
-  for (const c of children) {
-    const cid = c.inventoryItemId.replace("gid://shopify/InventoryItem/", "");
-    const dv = await getVariantQtyManagement(shopDomain, adminHeaders, c.variantId);
+  // First collect all divisors and current quantities
+  const childDivisors = await Promise.all(
+    children.map(async (child) => {
+      const cid = child.inventoryItemId.replace("gid://shopify/InventoryItem/", "");
+      const divisor = await getVariantQtyManagement(shopDomain, adminHeaders, child.variantId);
+      const oldQty = await getCurrentAvailableQuantity(shopDomain, adminHeaders, cid, ev.locationId);
+      
+      return {
+        child,
+        cid,
+        divisor,
+        oldQty
+      };
+    })
+  );
 
+  // Now that we have all the information, process the changes
+  for (const { child, cid, divisor, oldQty } of childDivisors) {
     let newCQty;
-    if (dv === 1) {
+    if (divisor === 1) {
       newCQty = ev.newQty;
     } else {
-      newCQty = Math.floor(ev.newQty / (dv || 1));
+      newCQty = Math.floor(ev.newQty / (divisor || 1));
     }
 
-    const oldCQty = await getCurrentAvailableQuantity(shopDomain, adminHeaders, cid, ev.locationId);
-    if (newCQty !== oldCQty) {
-      await setInventoryQuantity(shopDomain, adminHeaders, cid, ev.locationId, newCQty, true);
-      updatedVariants.add(c.variantId);
+    if (newCQty !== oldQty) {
+      batchUpdates.push({
+        inventoryItemId: cid,
+        locationId: ev.locationId,
+        quantity: newCQty
+      });
+      updatedVariants.add(child.variantId);
     }
-    // Adding each CHILD to childrenData
+    
+    // Add each CHILD to childrenData
     childrenData.push({
-      variantId: c.variantId,
-      sku: c.sku || '',
-      oldQty: oldCQty,
+      variantId: child.variantId,
+      sku: child.sku || '',
+      oldQty: oldQty,
       newQty: newCQty,
     });
   }
 
-  // Update 'qtyold' in DB and in metafield for MASTER and modified children
-  for (const vId of updatedVariants) {
+  // Perform all inventory updates in one batch
+  if (batchUpdates.length > 0) {
+    await setInventoryQuantityBatch(
+      shopDomain,
+      adminHeaders,
+      batchUpdates,
+      true
+    );
+  }
+
+  // Batch DB updates for 'qtyold' (using Promise.all for parallelism)
+  const dbUpdatePromises = Array.from(updatedVariants).map(async (vId) => {
+    let finalQty;
     if (vId === ev.variantId) {
-      await setQtyOldValueDB(shopDomain, vId, ev.newQty);
-      await setQtyOldValue(shopDomain, adminHeaders, vId, ev.newQty);
+      finalQty = ev.newQty;
     } else {
-      const childInvId = await getInventoryItemIdFromVariantId(shopDomain, adminHeaders, vId);
-      if (!childInvId) continue;
-      const realChildQty = await getCurrentAvailableQuantity(
+      const childInvId = await getInventoryItemIdFromVariantIdCached(shopDomain, adminHeaders, vId);
+      if (!childInvId) return;
+      finalQty = await getCurrentAvailableQuantity(
         shopDomain,
         adminHeaders,
         childInvId,
         ev.locationId
       );
-      await setQtyOldValueDB(shopDomain, vId, realChildQty);
-      await setQtyOldValue(shopDomain, adminHeaders, vId, realChildQty);
     }
-  }
+    
+    // Update DB and metafield in parallel
+    await Promise.all([
+      setQtyOldValueDB(shopDomain, vId, finalQty),
+      setQtyOldValue(shopDomain, adminHeaders, vId, finalQty)
+    ]);
+  });
+  
+  // Wait for all DB updates to complete
+  await Promise.all(dbUpdatePromises);
+
   // Send the webhook with final data
   console.log("🚀 Calling sendCustomWebhook...");
   await sendCustomWebhook(
@@ -1235,12 +1664,12 @@ export const action = async ({ request }) => {
   const hmacHeader = request.headers.get("X-Shopify-Hmac-Sha256");
   if (!secret || !hmacHeader) {
     console.error("Missing secret or HMAC => aborting.");
-    return new Response("Unauthorized", { status: 401 });
+    return new Response("Unauthorised", { status: 401 });
   }
   const isValid = verifyHmac(rawBody, hmacHeader, secret);
   if (!isValid) {
     console.error("Invalid HMAC => not from Shopify => aborting.");
-    return new Response("Unauthorized", { status: 401 });
+    return new Response("Unauthorised", { status: 401 });
   }
   console.log("✅ HMAC verified successfully.");
 
