@@ -57,9 +57,46 @@ export const action = async ({ request }) => {
     const masterCurrentQuantity = masterVariantNode.inventoryQuantity ?? 0;
     const masterDelta = newQuantity - masterCurrentQuantity;
 
-    // This is the location ID where we adjust inventory.
-    // Replace with your actual location ID as needed.
-    const locationId = "gid://shopify/Location/79544844508";
+    // NEW: Fetch the store's locations to avoid hardcoding
+    const locationResponse = await admin.graphql(
+      `#graphql
+      query getLocations {
+        locations(first: 10) {
+          edges {
+            node {
+              id
+              name
+              isActive
+              isPrimary
+            }
+          }
+        }
+      }
+      `
+    );
+
+    const locationData = await locationResponse.json();
+    const locationEdges = locationData?.data?.locations?.edges || [];
+
+    if (locationEdges.length === 0) {
+      throw new Error("Could not find any locations for this store.");
+    }
+
+    // Try to find the primary location first
+    let selectedLocation = locationEdges.find(edge => edge.node.isPrimary && edge.node.isActive);
+
+    // If no primary location, take the first active one
+    if (!selectedLocation) {
+      selectedLocation = locationEdges.find(edge => edge.node.isActive);
+    }
+
+    // If still no location, take any available location
+    if (!selectedLocation) {
+      selectedLocation = locationEdges[0];
+    }
+
+    const locationId = selectedLocation.node.id;
+    console.log(`Using location: ${selectedLocation.node.name} (${locationId})`);
 
     // If there's any difference, adjust the Master variant's inventory
     if (masterDelta !== 0) {
