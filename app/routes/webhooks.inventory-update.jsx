@@ -3,6 +3,8 @@
 import { json } from "@remix-run/node";
 import crypto from "crypto";
 import prisma from "../db.server.js"; // Adjust if your structure differs
+import axios from 'axios';
+import https from 'https';
 
 /**
  * ------------------------------------------------------------------
@@ -475,6 +477,7 @@ async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
               variant {
                 id
                 title
+                sku
                 product {
                   id
                   title
@@ -531,6 +534,7 @@ async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
       isMaster: true,
       variantId: variantNode.id,
       inventoryItemId,
+      sku: variantNode.sku || '',
       children: childrenIds,
     };
   }
@@ -573,6 +577,7 @@ async function getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId) {
     return {
       isChild: true,
       childVariantId: variantNode.id,
+      childSku: variantNode.sku || '',
       masterVariantId: masterVariantId,
       masterInventoryItemId: masterInventoryItemId,
       inventoryItemId,
@@ -684,6 +689,7 @@ async function getChildrenInventoryItems(shopDomain, adminHeaders, masterVariant
       nodes(ids: $variantIds) {
         ... on ProductVariant {
           id
+          sku
           inventoryItem {
             id
           }
@@ -719,6 +725,7 @@ async function getChildrenInventoryItems(shopDomain, adminHeaders, masterVariant
     if (node && node.inventoryItem?.id) {
       foundChildren.push({
         variantId: node.id,
+        sku: node.sku || '',
         inventoryItemId: node.inventoryItem.id,
       });
     } else {
@@ -853,6 +860,7 @@ async function getInventoryItemIdFromVariantId(shopDomain, adminHeaders, variant
     query GetVariantItem($id: ID!) {
       productVariant(id: $id) {
         id
+        sku
         inventoryItem {
           id
         }
@@ -1074,9 +1082,9 @@ async function handleChildEvent(ev) {
  */
 async function handleMasterEvent(ev) {
   const { shopDomain, adminHeaders } = ev;
-  console.log(`handleMasterEvent => oldQty:${ev.oldQty}, newQty:${ev.newQty}`);
+  console.log(`handleMasterEvent => oldQty:${ev.oldQty}, newQty:${ev.newQty}, sku:${ev.sku || 'N/A'}`);
 
-  // Ensure MASTER's inventory is set as expected
+  // Ensure MASTER's inventory is updated as expected
   const shopMasterQty = await getCurrentAvailableQuantity(
     shopDomain,
     adminHeaders,
@@ -1087,7 +1095,7 @@ async function handleMasterEvent(ev) {
     await setInventoryQuantity(shopDomain, adminHeaders, ev.inventoryItemId, ev.locationId, ev.newQty);
   }
 
-  // Recalculate children
+  // Recalculate children's inventory
   const children = await getChildrenInventoryItems(shopDomain, adminHeaders, ev.variantId);
   const updatedVariants = new Set();
   updatedVariants.add(ev.variantId);
@@ -1113,12 +1121,13 @@ async function handleMasterEvent(ev) {
     // Adding each CHILD to childrenData
     childrenData.push({
       variantId: c.variantId,
+      sku: c.sku || '',
       oldQty: oldCQty,
       newQty: newCQty,
     });
   }
 
-  // Update 'qtyold' in DB + metafield for MASTER + changed children
+  // Update 'qtyold' in DB and in metafield for MASTER and modified children
   for (const vId of updatedVariants) {
     if (vId === ev.variantId) {
       await setQtyOldValueDB(shopDomain, vId, ev.newQty);
@@ -1138,68 +1147,74 @@ async function handleMasterEvent(ev) {
   }
   // Send the webhook with final data
   console.log("🚀 Calling sendCustomWebhook...");
-    await sendCustomWebhook(shopDomain, { 
-      variantId: ev.variantId, 
-      oldQty: ev.oldQty, 
-      newQty: ev.newQty 
-    }, childrenData);
-    console.log("📬 sendCustomWebhook function executed.");
-  }
+  await sendCustomWebhook(
+    shopDomain,
+    { variantId: ev.variantId, sku: ev.sku || '', oldQty: ev.oldQty, newQty: ev.newQty },
+    childrenData
+  );
+  console.log("📬 sendCustomWebhook function executed.");
+}
 
-  async function sendCustomWebhook(shopDomain, masterData, childrenData) {
-    try {
-      console.log(`🔍 Retrieving customApiUrl for shop: ${shopDomain}`);
+async function sendCustomWebhook(shopDomain, masterData, childrenData) {
+  try {
+    console.log(`🔍 Retrieving customApiUrl for shop: ${shopDomain}`);
 
-      const subscription = await prisma.shopSubscription.findUnique({
-        where: { shop: shopDomain },
-      });
+    const subscription = await prisma.shopSubscription.findUnique({
+      where: { shop: shopDomain },
+    });
 
-      if (!subscription || !subscription.customApiUrl) {
-        console.warn(`⚠️ No customApiUrl found for shop: ${shopDomain}, skipping webhook.`);
-        return;
-      }
-
-      const webhookUrl = subscription.customApiUrl;
-      console.log(`📡 Sending webhook to: ${webhookUrl}`);
-
-      // JSON webhook structure
-      const payload = {
-        masterID: masterData.variantId,
-        "master old inventory": masterData.oldQty,
-        "master new inventory": masterData.newQty,
-        Modified: true,
-        children: childrenData.map((child) => ({
-          "child ID": child.variantId,
-          "child old inventory": child.oldQty,
-          "child new inventory": child.newQty,
-          Modified: true,
-        })),
-      };
-
-      console.log(`📦 Webhook Payload:`, JSON.stringify(payload, null, 2));
-
-      // Send webhook with POST method
-      const response = await fetch(webhookUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
-
-      console.log(`📨 Webhook response status: ${response.status}`);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`❌ Failed to send custom webhook. Status: ${response.status}, Response: ${errorText}`);
-      } else {
-        console.log(`✅ Custom webhook sent successfully to ${webhookUrl}`);
-      }
-    } catch (error) {
-      console.error("❌ Error sending custom webhook:", error);
+    if (!subscription || !subscription.customApiUrl) {
+      console.warn(`⚠️ No customApiUrl found for shop: ${shopDomain}, skipping webhook.`);
+      return;
     }
-  }
 
+    const webhookUrl = subscription.customApiUrl;
+    console.log(`📡 Sending webhook to: ${webhookUrl}`);
+
+    // JSON webhook structure
+    const payload = {
+      masterID: masterData.variantId,
+      masterSKU: masterData.sku,
+      "master old inventory": masterData.oldQty,
+      "master new inventory": masterData.newQty,
+      Modified: true,
+      children: childrenData.map((child) => ({
+        "child ID": child.variantId,
+        "child SKU": child.sku,
+        "child old inventory": child.oldQty,
+        "child new inventory": child.newQty,
+        Modified: true,
+      })),
+    };
+
+    console.log(`📦 Webhook Payload:`, JSON.stringify(payload, null, 2));
+
+    // Configure an HTTPS agent that forces IPv4 and maintains an active connection
+    const agent = new https.Agent({
+      keepAlive: true,
+      family: 4, // Force use of IPv4
+    });
+
+    // Send webhook using axios with configured timeout
+    const response = await axios.post(webhookUrl, payload, {
+      headers: {
+        "Content-Type": "application/json",
+      },
+      timeout: 20000, // 20 second timeout
+      httpsAgent: agent,
+    });
+
+    console.log(`📨 Webhook response status: ${response.status}`);
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error(`❌ Failed to send custom webhook. Status: ${response.status}, Response: ${response.data}`);
+    } else {
+      console.log(`✅ Custom webhook sent successfully to ${webhookUrl}`);
+    }
+  } catch (error) {
+    console.error("❌ Error sending custom webhook:", error.message);
+  }
+}
 
 /*
  * ------------------------------------------------------------------
@@ -1335,12 +1350,15 @@ export const action = async ({ request }) => {
   let variantId;
   let isMaster = false;
 
+  let sku = '';
   if (info.isMaster) {
     isMaster = true;
     variantId = info.variantId;
+    sku = info.sku;
   } else {
     isMaster = false;
     variantId = info.childVariantId;
+    sku = info.childSku;
   }
 
   // 9) Retrieve oldQty from DB instead of from Shopify
@@ -1363,6 +1381,7 @@ export const action = async ({ request }) => {
     locationId,
     newQty,
     oldQty,
+    sku,
   };
 
   if (info.isChild) {

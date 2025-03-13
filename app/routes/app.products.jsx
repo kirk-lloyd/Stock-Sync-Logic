@@ -1,8 +1,11 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { Page, Frame, Banner, Box, Button } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { Helmet } from "react-helmet";
 import { useLoaderData, useRevalidator } from "@remix-run/react";
+import { LoadingOverlay } from "../components/LoadingOverlay.jsx";
+import { BulkLoadingOverlay } from "../components/BulkLoadingOverlay.jsx";
+import { TablePreloader } from "../components/TablePreloader.jsx";
 import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -189,10 +192,28 @@ export default function ProductsView() {
   } = useLoaderData();
   
   const revalidator = useRevalidator();
+  
+  // State for sync loading modal
+  const [syncLoading, setSyncLoading] = useState(false);
+  
+  // State to control component rendering
+  const [isTableReady, setIsTableReady] = useState(false);
+
+  // Control the rendering of components to prevent layout jumps
+  useEffect(() => {
+    // Use a short timeout to ensure all resources are loaded
+    const timer = setTimeout(() => {
+      setIsTableReady(true);
+    }, 300);
+    
+    return () => clearTimeout(timer);
+  }, []);
 
   // Function to initiate product sync
   async function handleSyncProducts() {
     try {
+      setSyncLoading(true);
+      
       const response = await fetch("/api/start-bulk-operation", { 
         method: "POST",
         headers: { "Content-Type": "application/json" }
@@ -202,16 +223,18 @@ export default function ProductsView() {
         throw new Error("Failed to start bulk operation");
       }
       
-      // Show toast notification
-      // This will be handled by the ProductsTable component
-      
-      // Refresh page data after a short delay
+      // Wait 30 seconds to show the loading message
       setTimeout(() => {
+        // Hide the loading overlay after 30 seconds
+        setSyncLoading(false);
+        
+        // Use revalidator instead of hard reload
         revalidator.revalidate();
-      }, 2000);
+      }, 30000);
+      
     } catch (error) {
       console.error("Failed to sync products:", error);
-      // Toast notification handled by ProductsTable component
+      setSyncLoading(false);
     }
   }
 
@@ -220,12 +243,11 @@ export default function ProductsView() {
     return (
       <Frame>
         <Page>
-          <Banner title="Importing Products" status="info">
-            <p>
-              We're currently fetching your product catalogue in bulk. The status is <b>{bulkStatus}</b>.<br />
-              This page will auto-refresh until the data is ready.
-            </p>
-          </Banner>
+          <BulkLoadingOverlay 
+            active={true}
+            status={bulkStatus}
+            onRefresh={() => revalidator.revalidate()}
+          />
         </Page>
       </Frame>
     );
@@ -269,13 +291,26 @@ export default function ProductsView() {
           </Banner>
         )}
         
-        {/* Reusable ProductsTable component */}
-        <ProductsTable 
-          initialProducts={products}
-          locked={locked}
-          showMasterVariantsOnly={false} // Show all variants
-        />
+        {/* Control rendering to prevent layout jumps */}
+        <div style={{ position: 'relative' }}>
+          {!isTableReady && <TablePreloader />}
+          
+          <div style={{ visibility: isTableReady ? 'visible' : 'hidden' }}>
+            {/* Reusable ProductsTable component */}
+            <ProductsTable 
+              initialProducts={products}
+              locked={locked}
+              showMasterVariantsOnly={false} // Show all variants
+            />
+          </div>
+        </div>
       </Page>
+      
+      {/* Loading Overlay */}
+      <LoadingOverlay 
+        active={syncLoading} 
+        message="We're downloading all products from your store. The processing time depends on the number of products you have."
+      />
     </Frame>
   );
 }

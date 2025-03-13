@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { Page, Frame, Banner, Box, Button } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { Helmet } from "react-helmet";
@@ -7,6 +7,9 @@ import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { ProductsTable } from "../components/ProductsTable";
+import { LoadingOverlay } from "../components/LoadingOverlay.jsx";
+import { BulkLoadingOverlay } from "../components/BulkLoadingOverlay.jsx";
+import { TablePreloader } from "../components/TablePreloader.jsx";
 import {
   startBulkOperation,
   checkBulkOperationStatus,
@@ -194,6 +197,21 @@ export default function MasterProductsView() {
   } = useLoaderData();
   
   const revalidator = useRevalidator();
+  // State for sync loading modal
+  const [syncLoading, setSyncLoading] = useState(false);
+  
+  // State to control component rendering
+  const [isTableReady, setIsTableReady] = useState(false);
+
+  // Control the rendering of components to prevent layout jumps
+  useEffect(() => {
+    // Use a short timeout to ensure all resources are loaded
+    const timer = setTimeout(() => {
+      setIsTableReady(true);
+    }, 300);
+    
+    return () => clearTimeout(timer);
+  }, []);
 
   // Add automatic refresh for CREATED and RUNNING states
   useEffect(() => {
@@ -214,6 +232,8 @@ export default function MasterProductsView() {
   // Function to initiate product sync
   async function handleSyncProducts() {
     try {
+      setSyncLoading(true);
+      
       const response = await fetch("/api/start-bulk-operation", { 
         method: "POST",
         headers: { "Content-Type": "application/json" }
@@ -223,14 +243,18 @@ export default function MasterProductsView() {
         throw new Error("Failed to start bulk operation");
       }
       
-      console.log("Product sync started. This may take a few moments to complete.");
-      
-      // Refresh page data after a short delay
+      // Wait 30 seconds to show the loading message
       setTimeout(() => {
+        // Close the modal after 30 seconds
+        setSyncLoading(false);
+        
+        // Use revalidator instead of hard reload
         revalidator.revalidate();
-      }, 2000);
+      }, 30000);
+      
     } catch (error) {
       console.error("Failed to sync products:", error);
+      setSyncLoading(false);
     }
   }
 
@@ -239,19 +263,11 @@ export default function MasterProductsView() {
     return (
       <Frame>
         <Page>
-          <Banner title="Importing Products" status="info">
-            <p>
-              We're currently fetching your product catalogue in bulk. The status is <b>{bulkStatus}</b>.<br />
-              This page will auto-refresh until the data is ready.
-            </p>
-          </Banner>
-          
-          {/* Manual refresh button for better user experience */}
-          <Box padding="4" style={{ display: "flex", justifyContent: "center" }}>
-            <Button onClick={() => revalidator.revalidate()}>
-              Check Status Now
-            </Button>
-          </Box>
+          <BulkLoadingOverlay 
+            active={true}
+            status={bulkStatus}
+            onRefresh={() => revalidator.revalidate()}
+          />
         </Page>
       </Frame>
     );
@@ -295,13 +311,26 @@ export default function MasterProductsView() {
           </Banner>
         )}
         
-        {/* Reusable ProductsTable component with master filter applied */}
-        <ProductsTable 
-          initialProducts={products}
-          locked={locked}
-          showMasterVariantsOnly={true} // This flag indicates we're in the master view
-        />
+        {/* Control rendering to prevent layout jumps */}
+        <div style={{ position: 'relative' }}>
+          {!isTableReady && <TablePreloader />}
+          
+          <div style={{ visibility: isTableReady ? 'visible' : 'hidden' }}>
+            {/* Reusable ProductsTable component with master filter applied */}
+            <ProductsTable 
+              initialProducts={products}
+              locked={locked}
+              showMasterVariantsOnly={true} // This flag indicates we're in the master view
+            />
+          </div>
+        </div>
       </Page>
+      
+      {/* Loading Overlay */}
+      <LoadingOverlay 
+        active={syncLoading} 
+        message="We're downloading all products from your store. The processing time depends on the number of products you have."
+      />
     </Frame>
   );
 }

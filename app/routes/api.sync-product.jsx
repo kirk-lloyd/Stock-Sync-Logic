@@ -40,6 +40,10 @@ export const loader = async ({ request }) => {
             id
             value
           }
+          parentMasterMetafield: metafield(namespace: "projektstocksyncparentmaster", key: "parentmaster") {
+            id
+            value
+          }
           ratioMetafield: metafield(
             namespace: "projektstocksyncqtymanagement"
             key: "qtymanagement"

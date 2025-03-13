@@ -8,7 +8,6 @@ import {
   Button,
   Checkbox,
   Banner,
-  Pagination,
   Icon,
   Card,
   Grid,
@@ -23,6 +22,9 @@ import {
   ProgressBar
 } from "@shopify/polaris";
 import { DeleteIcon, CheckCircleIcon } from '@shopify/polaris-icons';
+
+// Import the AddChildrenModal component
+import AddChildrenModal from './AddChildrenModal';
 
 /**
  * SyncVariantModal Component
@@ -81,14 +83,6 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
   const [childrenDetails, setChildrenDetails] = useState({});
   const [masterRatios, setMasterRatios] = useState({});
   const [isAddChildrenModalOpen, setIsAddChildrenModalOpen] = useState(false);
-  const [availableProducts, setAvailableProducts] = useState([]);
-  const [childSearchQuery, setChildSearchQuery] = useState("");
-  const [loadingProducts, setLoadingProducts] = useState(false);
-  const [childrenPage, setChildrenPage] = useState(1);
-  const [totalAvailableProducts, setTotalAvailableProducts] = useState(0);
-  const childrenPerPage = 10;
-  
-  // Track parent master information
   const [parentMasters, setParentMasters] = useState({});
   
   // Check if this variant is a child of another master
@@ -143,7 +137,7 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
           
           return newProgress;
         });
-      }, 1500); // Update every second for 15 seconds total
+      }, 1500); // Update every 1.5 seconds for 15 seconds total
     }
     
     return () => {
@@ -347,6 +341,8 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
         let isChildVariant = false;
         let parentId = null;
         
+        console.log("Checking if this variant is a child:");
+        
         // Check for parent master info in various possible data structures
         if (v.parentMasterMetafield?.value && 
             v.parentMasterMetafield.value !== "[]" && 
@@ -393,17 +389,69 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
           console.log("Found parent master in rawParentMasterValue:", parentId);
         }
         
-        console.log("Is Child Variant:", isChildVariant);
-        console.log("Parent Master ID:", parentId);
+        console.log("Raw Is Child Variant:", isChildVariant);
+        console.log("Raw Parent Master ID:", parentId);
         
-        setIsChild(isChildVariant);
-        setParentMasterId(parentId);
+        // Process the parent master ID to ensure it's in the correct format
+        if (parentId) {
+          console.log("Processing parentId:", parentId);
+          
+          try {
+            // If it's in JSON array format, extract the first element
+            if (typeof parentId === 'string' && parentId.startsWith('[') && parentId.endsWith(']')) {
+              try {
+                const parsed = JSON.parse(parentId);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                  parentId = parsed[0];
+                  console.log("ID extracted from JSON array:", parentId);
+                }
+              } catch (e) {
+                console.log("Error parsing JSON array:", e);
+              }
+            }
+            
+            // If it's a string with quotes, extract the value
+            if (typeof parentId === 'string' && parentId.startsWith('"') && parentId.endsWith('"')) {
+              try {
+                parentId = JSON.parse(parentId);
+                console.log("ID extracted from quoted string:", parentId);
+              } catch (e) {
+                console.log("Error parsing quoted string:", e);
+              }
+            }
+          } catch (e) {
+            console.log("General error processing parentId:", e);
+          }
+        }
+        
+        console.log("Processed Parent Master ID:", parentId);
         
         setIsChild(isChildVariant);
         setParentMasterId(parentId);
         
         // If this is a child variant, fetch details about its parent master
         if (isChildVariant && parentId) {
+          console.log("Fetching parent master info for ID:", parentId);
+          
+          // Extract clean ID for display
+          let cleanId = parentId;
+          try {
+            // Could be a Shopify ID like "gid://shopify/ProductVariant/12345"
+            if (parentId.includes('/')) {
+              cleanId = parentId.split('/').pop() || parentId;
+            }
+          } catch (e) {
+            console.log("Error extracting clean ID:", e);
+          }
+          
+          // Immediately set temporary information
+          setParentMasterInfo({
+            id: parentId,
+            title: `Master ${cleanId}`,
+            productTitle: "Loading...",
+            sku: "Loading..."
+          });
+          
           fetchParentMasterInfo(parentId);
         }
         
@@ -642,195 +690,6 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
       console.error(`Error refreshing details for child ${childId}:`, error);
     }
   };
-
-  /**
-   * Fetches available products that can be added as children with pagination
-   * Uses a direct API call to get the latest metafield data
-   * 
-   * @param {number} page - The page number for pagination
-   * @param {string} searchQuery - Search query to filter available variants
-   */
-  const fetchAvailableProducts = async (page = 1, searchQuery = "") => {
-    console.log("fetchAvailableProducts called with page:", page, "and search:", searchQuery);
-    try {
-      setLoadingProducts(true);
-      
-      // Use the dedicated API that does a fresh query to Shopify
-      const url = new URL(`${window.location.origin}/api/bulk-products`);
-      url.searchParams.append('page', page);
-      url.searchParams.append('limit', childrenPerPage);
-      if (searchQuery) {
-        url.searchParams.append('q', searchQuery);
-      }
-      
-      const response = await fetch(url.toString());
-      
-      if (!response.ok) {
-        throw new Error('Failed to fetch available products');
-      }
-      
-      const data = await response.json();
-      console.log("Fresh product data received:", data);
-      
-      // Build a map of master variants for reference
-      const masterMap = {};
-      
-      // First pass to collect all masters
-      data.products.forEach(product => {
-        product.variants.edges.forEach(edge => {
-          const variant = edge.node;
-          if (variant.isMaster) {
-            masterMap[variant.id] = {
-              productTitle: product.title,
-              variantTitle: variant.title
-            };
-          }
-        });
-      });
-      
-      console.log("Master variants map:", masterMap);
-      
-      // Transform the data to a usable format with additional flags
-      const allVariants = [];
-      
-      data.products.forEach(product => {
-        product.variants.edges.forEach(edge => {
-          const variant = edge.node;
-          
-          // Skip the current variant (can't add itself as a child)
-          if (variant.id === variantId) return;
-          
-          // Determine if this variant should be available
-          let unavailable = false;
-          let unavailableReason = "";
-          
-          // Check if it's already a child of this master
-          const isAlreadyChild = children.includes(variant.id);
-          if (isAlreadyChild) {
-            unavailable = true;
-            unavailableReason = "Already a child of this master";
-          }
-          
-          // Check if it's a master variant
-          if (variant.isMaster && !unavailable) {
-            unavailable = true;
-            unavailableReason = "Cannot add - this variant is a master";
-          }
-          
-          // Check if it has a parent master (most important check)
-          if (!unavailable && variant.hasParentMaster) {
-            // If the parent master is not this variant
-            if (variant.parentMasterId && variant.parentMasterId !== variantId) {
-              unavailable = true;
-              
-              // Try to find the parent master's details
-              const masterDetails = masterMap[variant.parentMasterId];
-              
-              // Extract numeric ID from the GID
-              let masterId = variant.parentMasterId ? variant.parentMasterId.split('/').pop() : '';
-              
-              let masterInfo = masterDetails 
-                ? `"${masterDetails.productTitle} - ${masterDetails.variantTitle}"` 
-                : `another master: ${masterId}`;
-              
-              unavailableReason = `Already assigned as a child of ${masterInfo}`;
-            }
-          }
-          
-          // IMPORTANT: Add explicit check for raw parent master value
-          if (!unavailable && variant.rawParentMasterValue && 
-              variant.rawParentMasterValue !== "[]" && 
-              variant.rawParentMasterValue !== "null") {
-            unavailable = true;
-            
-            let masterId = '';
-            try {
-              const parsedValue = JSON.parse(variant.rawParentMasterValue);
-              if (Array.isArray(parsedValue) && parsedValue.length > 0) {
-                // Extract the numeric ID from the GID
-                masterId = parsedValue[0].split('/').pop() || '';
-              }
-            } catch (e) {
-              // If parsing fails, try to extract ID directly from the string
-              masterId = variant.rawParentMasterValue.split('/').pop() || '';
-            }
-            
-            unavailableReason = masterId 
-              ? `Already assigned to another master: ${masterId}` 
-              : "Already assigned to another master";
-          }
-          
-          allVariants.push({
-            id: variant.id,
-            title: variant.title,
-            sku: variant.sku || '',
-            productTitle: product.title,
-            image: variant.image?.originalSrc || null,
-            unavailable: unavailable,
-            unavailableReason: unavailableReason,
-            hasParentMaster: variant.hasParentMaster || false,
-            parentMasterId: variant.parentMasterId || null,
-            rawParentMasterValue: variant.rawParentMasterValue || null
-          });
-        });
-      });
-      
-      console.log("Processed variants for Add Children modal:", allVariants);
-      
-      setAvailableProducts(allVariants);
-      setTotalAvailableProducts(data.totalCount || allVariants.length);
-    } catch (error) {
-      console.error('Error fetching available products:', error);
-      setError('Failed to load available products. Please try again.');
-    } finally {
-      setLoadingProducts(false);
-    }
-  };
-  
-  /**
-   * Opens the Add Children modal and initializes product search
-   */
-  const handleOpenAddChildrenModal = () => {
-    console.log("Opening Add Children modal");
-    try {
-      setChildrenPage(1);
-      setChildSearchQuery('');
-      fetchAvailableProducts(1, '');
-      setIsAddChildrenModalOpen(true);
-    } catch (err) {
-      console.error("Error opening Add Children modal:", err);
-    }
-  };
-  
-  /**
-   * Closes the Add Children modal and resets search state
-   */
-  const handleCloseAddChildrenModal = () => {
-    setIsAddChildrenModalOpen(false);
-    setChildSearchQuery('');
-    setChildrenPage(1);
-  };
-  
-  /**
-   * Handles page change in the Add Children modal
-   * 
-   * @param {number} newPage - The new page number to display
-   */
-  const handleChildrenPageChange = (newPage) => {
-    setChildrenPage(newPage);
-    fetchAvailableProducts(newPage, childSearchQuery);
-  };
-  
-  /**
-   * Handles search query changes in the Add Children modal
-   * 
-   * @param {string} query - The search query entered by the user
-   */
-  const handleChildrenSearch = (query) => {
-    setChildSearchQuery(query);
-    setChildrenPage(1); // Reset to first page on new search
-    fetchAvailableProducts(1, query);
-  };
   
   /**
    * Sets the parent-master metafield for a child variant
@@ -937,22 +796,6 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
         return;
       }
       
-      // Find the variant in our available products list
-      const productToAdd = availableProducts.find(p => p.id === childId);
-      
-      // Safety check: Don't allow adding if the variant is unavailable
-      // This prevents adding variants that are already children of other masters
-      if (productToAdd && productToAdd.unavailable) {
-        setError(`Cannot add this variant. ${productToAdd.unavailableReason}`);
-        return;
-      }
-      
-      // Additional safety check: verify no parent master exists
-      if (productToAdd && productToAdd.hasParentMaster && productToAdd.parentMasterId !== variantId) {
-        setError(`Cannot add this variant as it already has a parent master assigned. A variant can only be a child of one master at a time.`);
-        return;
-      }
-      
       // Create updated children array
       const updatedChildren = [...children, childId];
       
@@ -989,13 +832,11 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
       
       setSuccess('Child added successfully');
       
-      // Remove the added child from available products
-      setAvailableProducts(prev => prev.filter(product => product.id !== childId));
-      setTotalAvailableProducts(prev => prev - 1);
-      
+      return true;
     } catch (err) {
       console.error('Error adding child:', err);
       setError(err.message);
+      return false;
     }
   };
 
@@ -1155,25 +996,134 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
    */
   const fetchParentMasterInfo = async (masterId) => {
     try {
-      console.log(`Fetching parent master info for ID: ${masterId}`);
-      const res = await fetch(`/api/sync-product?variantId=${encodeURIComponent(masterId)}`);
-      if (!res.ok) {
-        throw new Error("Failed to fetch parent master info");
+      console.log(`=== START: fetchParentMasterInfo for ID: ${masterId} ===`);
+      
+      // If there's no ID, we can't proceed
+      if (!masterId) {
+        console.error("Error: masterId is null or empty");
+        return;
       }
       
-      const data = await res.json();
-      const masterVariant = data.product;
+      // Extract the numeric ID for display purposes
+      let displayId = "Unknown";
+      try {
+        // Could be a Shopify ID like "gid://shopify/ProductVariant/12345678"
+        if (typeof masterId === 'string' && masterId.includes('/')) {
+          displayId = masterId.split('/').pop() || masterId;
+          console.log("ID extracted for display:", displayId);
+        } else {
+          displayId = String(masterId);
+        }
+      } catch (e) {
+        console.log("Error extracting display ID:", e);
+      }
       
-      if (masterVariant) {
+      // Construct the URL for the API query
+      const apiUrl = `/api/sync-product?variantId=${encodeURIComponent(masterId)}`;
+      console.log(`API URL: ${apiUrl}`);
+      
+      // Set temporary information while loading
+      setParentMasterInfo({
+        id: masterId,
+        title: `Master ${displayId}`,
+        productTitle: "Loading...",
+        sku: "Loading..."
+      });
+      
+      // Make the API call with a timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+      
+      try {
+        const res = await fetch(apiUrl, {
+          signal: controller.signal,
+          headers: {
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
+          }
+        });
+        clearTimeout(timeoutId);
+        
+        console.log("API response status:", res.status);
+        
+        if (!res.ok) {
+          console.error(`Error response from API: ${res.status} ${res.statusText}`);
+          // Set basic info on error
+          setParentMasterInfo({
+            id: masterId,
+            title: `Master ${displayId}`,
+            productTitle: "Error loading",
+            sku: "Error loading"
+          });
+          throw new Error(`Failed API call with status ${res.status}`);
+        }
+        
+        // Get the response text
+        const responseText = await res.text();
+        console.log("API response length:", responseText.length);
+        console.log("API response preview:", responseText.substring(0, 100) + "...");
+        
+        // Try to parse the JSON response
+        try {
+          const data = JSON.parse(responseText);
+          console.log("API data preview:", data ? "Data received" : "No data");
+          
+          const masterVariant = data.product;
+          
+          if (masterVariant) {
+            console.log("Master variant data:", {
+              title: masterVariant.title,
+              product_title: masterVariant.product?.title,
+              sku: masterVariant.sku
+            });
+            
+            setParentMasterInfo({
+              id: masterId,
+              title: masterVariant.title || `Master ${displayId}`,
+              productTitle: masterVariant.product?.title || "Unknown Product",
+              sku: masterVariant.sku || "Unknown SKU"
+            });
+            console.log("ParentMasterInfo updated with actual data.");
+          } else {
+            console.error("No product data in API response");
+            setParentMasterInfo({
+              id: masterId,
+              title: `Master ${displayId}`,
+              productTitle: "Product Not Found",
+              sku: "SKU Not Found"
+            });
+          }
+        } catch (parseError) {
+          console.error("Error parsing JSON response:", parseError);
+          setParentMasterInfo({
+            id: masterId,
+            title: `Master ${displayId}`,
+            productTitle: "Data Parsing Error",
+            sku: "Data Parsing Error"
+          });
+        }
+      } catch (fetchError) {
+        clearTimeout(timeoutId);
+        console.error("Error fetching data:", fetchError);
         setParentMasterInfo({
           id: masterId,
-          title: masterVariant.title || "Unknown",
-          productTitle: masterVariant.product?.title || "Unknown Product",
-          sku: masterVariant.sku || ""
+          title: `Master ${displayId}`,
+          productTitle: "Connection Error",
+          sku: "Connection Error"
         });
       }
     } catch (error) {
-      console.error("Error fetching parent master info:", error);
+      console.error("General error in fetchParentMasterInfo:", error);
+      // Ensure we still have basic info
+      setParentMasterInfo({
+        id: masterId || "unknown",
+        title: `Master ${masterId ? (masterId.includes('/') ? masterId.split('/').pop() : masterId) : "unknown"}`,
+        productTitle: "General Error",
+        sku: "General Error"
+      });
+    } finally {
+      console.log(`=== END: fetchParentMasterInfo ===`);
     }
   };
 
@@ -1308,9 +1258,21 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
       setLoading(false);
     }
   }
+
+  /**
+   * Opens the Add Children modal
+   */
+  const handleOpenAddChildrenModal = () => {
+    console.log("Opening Add Children modal");
+    setIsAddChildrenModalOpen(true);
+  };
   
-  // Calculate total pages for pagination
-  const totalPages = Math.ceil(totalAvailableProducts / childrenPerPage);
+  /**
+   * Closes the Add Children modal
+   */
+  const handleCloseAddChildrenModal = () => {
+    setIsAddChildrenModalOpen(false);
+  };
 
   // Render loading skeleton when data is being fetched
   if (loading) {
@@ -1427,7 +1389,7 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
                     marginBottom: "15px",
                     textAlign: "center"
                   }}>
-                    Manual Updating Variant
+                    Updating Variant
                   </div>
                   
                   <div style={{
@@ -1505,7 +1467,7 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
                         <Text variant="bodyMd" as="p">{variantData.sku || "N/A"}</Text>
                       </Grid.Cell>
                     </Grid>
-              {/* Parent Master Information - Solo mostrar cuando es un child */}
+              {/* Parent Master Information - Only show when it's a child variant */}
               {isChild && parentMasterId && (
                 <Card>
                   <div className="Card-Section">
@@ -1572,7 +1534,17 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
                           title="Inventory managed by master variant"
                           status="info"
                         >
-                          <p>This child variant's inventory is controlled by its master variant. The inventory cannot be modified directly.</p>
+                          <p>
+                            This child variant's inventory is controlled by its Master variant:
+                            {parentMasterInfo ? (
+                              <> <strong>{parentMasterInfo.title}</strong> SKU: <strong>{parentMasterInfo.sku || "N/A"}</strong></>
+                            ) : parentMasterId ? (
+                              <> <strong>Master ID: {parentMasterId.split('/').pop() || parentMasterId}</strong></>
+                            ) : (
+                              <> <strong>Unknown Master</strong></>
+                            )}
+                            . The inventory cannot be modified directly.
+                          </p>
                         </Banner>
                         
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1773,7 +1745,7 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
                                         labelHidden={true}
                                         type="number"
                                         value={masterRatios[childId] !== undefined ? String(masterRatios[childId]) : ""}
-                                        placeholder="Value"
+                                        placeholder="1 by default"
                                         onChange={(value) => {
                                           // If value is empty, store as empty string
                                           if (value === "") {
@@ -1836,6 +1808,15 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
                       </EmptyState>
                     )}
                 </div>
+                <Banner
+                      title="Inventory Synchronisation Notice"
+                      status="info"
+                      tone="highlight"
+                    >
+                      <p>
+                      Please be advised that the inventory of both master and children variants will automatically update when inventory adjustments occur. For manual synchronisation, you'll need to modify the master quantity and select "Save Changes" to properly update the inventory across all linked variants.
+                      </p>
+                    </Banner>
               </Card>
               )}
             </BlockStack>
@@ -1858,246 +1839,16 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
           </div>
         </Modal.Section>
       </Modal>
-    
-      {/* Add Children Modal with Pagination */}
-      {isAddChildrenModalOpen && (
-        <Modal
-          open={true}
-          onClose={handleCloseAddChildrenModal}
-          title="Add Child Variants"
-          size="large"
-        >
-          <Modal.Section>
-            <BlockStack gap="4">
-              <Text variant="bodyMd" as="p">
-                Select variants to add as children to this master variant. Child variants will be linked to this master for inventory synchronization.
-              </Text>
-              
-              {/* Search field */}
-              <TextField
-                label="Search"
-                value={childSearchQuery}
-                onChange={(value) => {
-                  setChildSearchQuery(value);
-                  handleChildrenSearch(value);
-                }}
-                placeholder="Search by product title, variant title or SKU"
-                clearButton
-                onClearButtonClick={() => {
-                  setChildSearchQuery('');
-                  handleChildrenSearch('');
-                }}
-              />
-              
-              {loadingProducts ? (
-                <div style={{ display: 'flex', justifyContent: 'center', padding: '2rem' }}>
-                  <Spinner accessibilityLabel="Loading products" size="large" />
-                </div>
-              ) : (
-                <Card>
-                  <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
-                    <table className="PolarisTEMPTable" style={{ width: '100%', borderCollapse: 'collapse' }}>
-                      <thead>
-                        <tr>
-                          <th style={{ 
-                            padding: '12px 16px', 
-                            borderBottom: '1px solid #ddd', 
-                            textAlign: 'left',
-                            width: '70px'
-                          }}>
-                            Image
-                          </th>
-                          <th style={{ 
-                            padding: '12px 16px', 
-                            borderBottom: '1px solid #ddd', 
-                            textAlign: 'left' 
-                          }}>
-                            Product
-                          </th>
-                          <th style={{ 
-                            padding: '12px 16px', 
-                            borderBottom: '1px solid #ddd', 
-                            textAlign: 'left' 
-                          }}>
-                            Variant
-                          </th>
-                          <th style={{ 
-                            padding: '12px 16px', 
-                            borderBottom: '1px solid #ddd', 
-                            textAlign: 'left',
-                            width: '120px'
-                          }}>
-                            SKU
-                          </th>
-                          <th style={{ 
-                            padding: '12px 16px', 
-                            borderBottom: '1px solid #ddd', 
-                            textAlign: 'left',
-                            width: '130px'
-                          }}>
-                            Action
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {availableProducts.map(product => (
-                          <tr key={product.id}>
-                            <td style={{ 
-                              padding: '12px 16px', 
-                              borderBottom: '1px solid #f1f1f1' 
-                            }}>
-                              {product.image ? (
-                                <img 
-                                  src={product.image} 
-                                  alt={product.title || 'Product'} 
-                                  style={{ 
-                                    width: '50px', 
-                                    height: '50px', 
-                                    objectFit: 'contain',
-                                    border: '1px solid #ddd',
-                                    borderRadius: '4px'
-                                  }} 
-                                  onError={(e) => {
-                                    e.target.onerror = null;
-                                    e.target.style.display = 'none';
-                                    e.target.parentNode.innerHTML = `
-                                      <div 
-                                        style="width: 50px; height: 50px; background-color: #f0f0f0; 
-                                              border: 1px solid #ddd; border-radius: 4px; display: flex; 
-                                              align-items: center; justify-content: center;"
-                                      >
-                                        <span style="color: #999; font-size: 10px;">No image</span>
-                                      </div>
-                                    `;
-                                  }}
-                                />
-                              ) : (
-                                <div 
-                                  style={{ 
-                                    width: '50px', 
-                                    height: '50px', 
-                                    backgroundColor: '#f0f0f0',
-                                    border: '1px solid #ddd',
-                                    borderRadius: '4px',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center'
-                                  }}
-                                >
-                                  <span style={{ color: '#999', fontSize: '10px' }}>No image</span>
-                                </div>
-                              )}
-                            </td>
-                            <td style={{ 
-                              padding: '12px 16px', 
-                              borderBottom: '1px solid #f1f1f1' 
-                            }}>
-                              <Text variant="bodyMd" as="p">
-                                {product.productTitle}
-                              </Text>
-                            </td>
-                            <td style={{ 
-                              padding: '12px 16px', 
-                              borderBottom: '1px solid #f1f1f1' 
-                            }}>
-                              <Text variant="bodyMd" as="p" fontWeight="semibold">
-                                {product.title || "Unknown"}
-                              </Text>
-                              <Text variant="bodySm" as="p" color="subdued">
-                                ID: {product.id.split('/').pop() || product.id}
-                              </Text>
-                            </td>
-                            <td style={{ 
-                              padding: '12px 16px', 
-                              borderBottom: '1px solid #f1f1f1' 
-                            }}>
-                              <Text variant="bodyMd" as="p">
-                                {product.sku || "—"}
-                              </Text>
-                            </td>
-                            <td style={{ 
-                              padding: '12px 16px', 
-                              borderBottom: '1px solid #f1f1f1' 
-                            }}>
-                              {product.unavailable || product.hasParentMaster || (product.rawParentMasterValue && product.rawParentMasterValue !== "[]" && product.rawParentMasterValue !== "null") ? (
-                                <div style={{ 
-                                  color: '#bf0711', 
-                                  backgroundColor: '#fbeae5',
-                                  padding: '6px 10px',
-                                  borderRadius: '4px',
-                                  fontSize: '0.85rem',
-                                  fontWeight: '500'
-                                }}>
-                                  {product.unavailableReason || "Already assigned to another master"}
-                                </div>
-                              ) : (
-                                <Button 
-                                  primary
-                                  size="medium"
-                                  onClick={() => handleAddChild(product.id)}
-                                  disabled={
-                                    product.unavailable || 
-                                    product.hasParentMaster || 
-                                    (product.rawParentMasterValue && 
-                                     product.rawParentMasterValue !== "[]" && 
-                                     product.rawParentMasterValue !== "null")
-                                  }
-                                >
-                                  Add
-                                </Button>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                        
-                        {availableProducts.length === 0 && (
-                          <tr>
-                            <td colSpan="5" style={{ padding: '32px 16px', textAlign: 'center' }}>
-                              <EmptyState
-                                heading={
-                                  childSearchQuery 
-                                    ? 'No matching variants found' 
-                                    : 'No available variants found'
-                                }
-                                image=""
-                              >
-                                <p>
-                                  {childSearchQuery 
-                                    ? 'Try a different search term or check for variants that are not already assigned to other masters.' 
-                                    : 'There are no available variants to add as children. Create more variants or free existing variants from other masters.'}
-                                </p>
-                              </EmptyState>
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </Card>
-              )}
-              
-              {/* Pagination controls */}
-              {totalPages > 1 && (
-                <div style={{ display: 'flex', justifyContent: 'center', padding: '1rem' }}>
-                  <Pagination
-                    hasPrevious={childrenPage > 1}
-                    onPrevious={() => handleChildrenPageChange(childrenPage - 1)}
-                    hasNext={childrenPage < totalPages}
-                    onNext={() => handleChildrenPageChange(childrenPage + 1)}
-                    label={`${(childrenPage - 1) * childrenPerPage + 1}-${Math.min(childrenPage * childrenPerPage, totalAvailableProducts)} of ${totalAvailableProducts} variants`}
-                  />
-                </div>
-              )}
-            </BlockStack>
-          </Modal.Section>
-          
-          <Modal.Section>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-              <Button onClick={handleCloseAddChildrenModal}>Done</Button>
-            </div>
-          </Modal.Section>
-        </Modal>
-      )}
+      
+      {/* Use the separate AddChildrenModal component */}
+      <AddChildrenModal
+        open={isAddChildrenModalOpen}
+        onClose={handleCloseAddChildrenModal}
+        variantId={variantId}
+        currentChildren={children}
+        onAddChild={handleAddChild}
+        setError={setError}
+      />
     </>
   );
 }
