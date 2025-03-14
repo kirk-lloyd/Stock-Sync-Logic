@@ -10,23 +10,24 @@
 import { json } from "@remix-run/node";
 
 // Import all our server-side methods from the .server file:
-const {
-  verifyHmac,
-  getShopSessionHeaders,
-  hasExactKey,
-  markExactKey,
-  buildExactDedupKey,
-  buildPredictedKey,
-  hasPredictedUpdate,
-  markComboKey,
-  hasComboKey,
-  addEventToAggregator,
-  setInventoryQuantity,
-  setQtyOldValueDB,
-  setQtyOldValue
-} = await import("./webhooks.inventory-update.backend.js");
 
 export const action = async ({ request }) => {
+  const {
+    verifyHmac,
+    getShopSessionHeaders,
+    hasExactKey,
+    markExactKey,
+    buildExactDedupKey,
+    buildPredictedKey,
+    hasPredictedUpdate,
+    markComboKey,
+    hasComboKey,
+    addEventToAggregator,
+    setInventoryQuantity,
+    setQtyOldValueDB,
+    setQtyOldValue
+  } = await import("./webhooks.inventory-update.server.js");
+
   console.log("🔔 Inventory Webhook => aggregator + difference-based + childDivisor=1 logic.");
 
   // 1) Parse raw body
@@ -109,7 +110,7 @@ export const action = async ({ request }) => {
 
   // We dynamically import getMasterChildInfo here, or we can have it 
   // pre-imported from .server. For brevity, let's do it inline:
-  const { getMasterChildInfo } = await import("./webhooks.inventory-update.backend.js");
+  const { getMasterChildInfo } = await import("./webhooks.inventory-update.server.js");
   const info = await getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId);
 
   if (!info) {
@@ -117,7 +118,7 @@ export const action = async ({ request }) => {
     await setInventoryQuantity(shopDomain, adminHeaders, inventoryItemId, locationId, newQty);
 
     // Also store the new qty as oldQty in the DB for future reference
-    const { getInventoryItemIdFromVariantId } = await import("./webhooks.inventory-update.backend.js");
+    const { getInventoryItemIdFromVariantId } = await import("./webhooks.inventory-update.server.js");
     const fallbackVariantId = await fetch(
       `https://${shopDomain}/admin/api/2024-10/graphql.json`,
       {
@@ -167,7 +168,7 @@ export const action = async ({ request }) => {
     sku = info.childSku;
   }
 
-  const { getQtyOldValueDB } = await import("./webhooks.inventory-update.backend.js");
+  const { getQtyOldValueDB } = await import("./webhooks.inventory-update.server.js");
   const oldQty = await getQtyOldValueDB(shopDomain, variantId);
   console.log(`(DB-based oldQty) => old:${oldQty}, new:${newQty}`);
 
