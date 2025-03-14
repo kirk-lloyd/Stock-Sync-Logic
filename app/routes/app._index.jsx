@@ -200,7 +200,7 @@ export default function Index() {
                         How to use
                       </Text>
                       <Link
-                        url="https://www.youtube.com/y91Pyv6xfOQ"
+                        url="https://www.youtube.com/oEsBAfQXUHo"
                         target="_blank"
                         removeUnderline
                       >
@@ -212,7 +212,7 @@ export default function Index() {
                         How to add children
                       </Text>
                       <Link
-                        url="https://www.youtube.com/g5D4Z25ILA4"
+                        url="https://www.youtube.com/oEsBAfQXUHo"
                         target="_blank"
                         removeUnderline
                       >
@@ -225,7 +225,7 @@ export default function Index() {
                       </Text>
                       <span>
                         <Link
-                          url="https://youtube.com/RKYKu71hIL4"
+                          url="https://youtube.com/oEsBAfQXUHo"
                           target="_blank"
                           removeUnderline
                         >

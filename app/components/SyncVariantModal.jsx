@@ -885,7 +885,7 @@ export default function SyncVariantModal({ variantId, onClose, onUpdate }) {
       let animationStartTime = Date.now();
       let animationTimer = setInterval(() => {
         const elapsedMs = Date.now() - animationStartTime;
-        const totalDurationMs = 8000; // 8 seconds in milliseconds
+        const totalDurationMs = 15000; // 15 seconds total
 
         // Calculate progress based solely on elapsed time
         const progress = Math.floor((elapsedMs / totalDurationMs) * 100);

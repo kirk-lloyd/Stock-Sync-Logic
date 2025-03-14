@@ -78,7 +78,7 @@ export default function AdditionalPage() {
                   <iframe
                     width="560"
                     height="315"
-                    src="https://www.youtube.com/embed/y91Pyv6xfOQ"
+                    src="https://www.youtube.com/embed/SzNUaNqiHB8"
                     title="YouTube video player"
                     frameBorder="0"
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
@@ -102,7 +102,7 @@ export default function AdditionalPage() {
                   linked Child.
                 </Text>
                 {/* 3. Embedded YouTube video between the welcome text and the next section */}
-                <div style={{ display: "flex", justifyContent: "center", margin: "1rem 0" }}>
+                {/*<div style={{ display: "flex", justifyContent: "center", margin: "1rem 0" }}>
                   <iframe
                     width="560"
                     height="315"
@@ -112,7 +112,7 @@ export default function AdditionalPage() {
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                     allowFullScreen
                   ></iframe>
-                </div>
+                </div>*/}
               </BlockStack>
             </Card>
             {/* Card 4: What is a Child */}
@@ -155,7 +155,7 @@ export default function AdditionalPage() {
                   products.
                 </Text>
                 {/* 3. Embedded YouTube video between the welcome text and the next section */}
-                <div style={{ display: "flex", justifyContent: "center", margin: "1rem 0" }}>
+                {/*<div style={{ display: "flex", justifyContent: "center", margin: "1rem 0" }}>
                   <iframe
                     width="560"
                     height="315"
@@ -165,7 +165,7 @@ export default function AdditionalPage() {
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                     allowFullScreen
                   ></iframe>
-                </div>
+                </div>*/}
               </BlockStack>
             </Card>
             {/* Card 6: What is a Master Ratio */}

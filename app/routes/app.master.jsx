@@ -285,7 +285,7 @@ export default function MasterProductsView() {
         {/* Top-right Sync Products button */}
         <Box padding="4" style={{ display: "flex", justifyContent: "flex-end" }}>
           <Button primary onClick={handleSyncProducts}>
-            Sync Products
+            Update Products
           </Button>
         </Box>
         
