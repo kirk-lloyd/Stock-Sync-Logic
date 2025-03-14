@@ -107,7 +107,6 @@ export const action = async ({ request }) => {
   const newQty = payload.available;
 
   // Dynamically import another helper if needed:
-  const { getMasterChildInfo } = await import("./webhooks.inventory-update.helpers.server.js");
   const info = await getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId);
 
   if (!info) {
