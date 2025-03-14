@@ -30,7 +30,7 @@ export const action = async ({ request }) => {
     getMasterChildInfo,
     getInventoryItemIdFromVariantId
     // ... any other functions you need
-  } = await import("./webhooks.inventory-update.helpers.server.js");
+  } = await import("../server/webhooks.inventory-update.helpers.server.js");
 
   console.log("🔔 Inventory Webhook => aggregator + difference-based + childDivisor=1 logic.");
 
@@ -114,7 +114,7 @@ export const action = async ({ request }) => {
     await setInventoryQuantity(shopDomain, adminHeaders, inventoryItemId, locationId, newQty);
 
     // Also store the new qty as oldQty in the DB for future reference
-    const { getInventoryItemIdFromVariantId } = await import("./webhooks.inventory-update.helpers.server.js");
+    const { getInventoryItemIdFromVariantId } = await import("../server/webhooks.inventory-update.helpers.server.js");
     const fallbackVariantId = await fetch(
       `https://${shopDomain}/admin/api/2024-10/graphql.json`,
       {
@@ -165,7 +165,7 @@ export const action = async ({ request }) => {
   }
 
   // Import the function to get oldQty from DB
-  const { getQtyOldValueDB } = await import("./webhooks.inventory-update.helpers.server.js");
+  const { getQtyOldValueDB } = await import("../server/webhooks.inventory-update.helpers.server.js");
   const oldQty = await getQtyOldValueDB(shopDomain, variantId);
   console.log(`(DB-based oldQty) => old:${oldQty}, new:${newQty}`);
 

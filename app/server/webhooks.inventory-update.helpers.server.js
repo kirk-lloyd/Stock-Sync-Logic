@@ -234,10 +234,6 @@ export async function setInventoryQuantity(
     cleanInventoryItemId = `gid://shopify/InventoryItem/${inventoryItemId}`;
   }
 
-  const MY_APP_URL = process.env.MY_APP_URL || "https://your-app-url.com";
-  const referenceDocumentUriValue = internal
-    ? `${MY_APP_URL}/by_app/internal-update`
-    : `${MY_APP_URL}/by_app/external-update`;
 
   // Mark as predicted update
   const pKey = buildPredictedKey(
