@@ -1,17 +1,18 @@
 /************************************************************************
- * webhooks.inventory-update.jsx
- * 
- * This Remix route file now only imports server-side code in the 'action' 
- * export. By keeping the server code separated in 
- * webhooks.inventory-update.server.js, Remix will not attempt to bundle 
- * server-only modules into the client build, eliminating the 
- * "Server-only module referenced by client" error.
+ * webhooks.inventory-update.server.jsx
+ *
+ * This Remix route file is now treated as server-only due to the ".server.jsx"
+ * extension. We dynamically import our server helpers to avoid bundling
+ * them into the client build, resolving the "Server-only module referenced
+ * by client" error.
  ************************************************************************/
 import { json } from "@remix-run/node";
 
-// Import all our server-side methods from the .server file:
+// There is NO default export (no React component). 
+// Only the server 'action' function.
 
 export const action = async ({ request }) => {
+  // Dynamically import all your server-side methods from the helper file:
   const {
     verifyHmac,
     getShopSessionHeaders,
@@ -25,8 +26,11 @@ export const action = async ({ request }) => {
     addEventToAggregator,
     setInventoryQuantity,
     setQtyOldValueDB,
-    setQtyOldValue
-  } = await import("./webhooks.inventory-update.server.js");
+    setQtyOldValue,
+    getMasterChildInfo,
+    getInventoryItemIdFromVariantId
+    // ... any other functions you need
+  } = await import("./webhooks.inventory-update.helpers.server.js");
 
   console.log("🔔 Inventory Webhook => aggregator + difference-based + childDivisor=1 logic.");
 
@@ -55,18 +59,12 @@ export const action = async ({ request }) => {
   }
   console.log("✅ HMAC verified successfully.");
 
-  // 3) Retrieve shop domain from header & check subscription
+  // 3) Retrieve shop domain from header
   const shopDomain = request.headers.get("X-Shopify-Shop-Domain");
   if (!shopDomain) {
     console.error("No X-Shopify-Shop-Domain header => cannot retrieve tokens");
     return new Response("Shop domain missing", { status: 400 });
   }
-
-  // Check subscription in DB:
-  // Note: We can do a quick DB fetch here as well, but let's keep it minimal 
-  // if you want to show a direct example. We'll skip the plan checking logic 
-  // for brevity. In your production code, ensure the shop has an active 
-  // subscription before proceeding.
 
   // 4) Short-term dedup => 10 seconds
   const dedupKey = buildExactDedupKey(payload);
@@ -108,9 +106,8 @@ export const action = async ({ request }) => {
   const inventoryItemId = payload.inventory_item_id;
   const newQty = payload.available;
 
-  // We dynamically import getMasterChildInfo here, or we can have it 
-  // pre-imported from .server. For brevity, let's do it inline:
-  const { getMasterChildInfo } = await import("./webhooks.inventory-update.server.js");
+  // Dynamically import another helper if needed:
+  const { getMasterChildInfo } = await import("./webhooks.inventory-update.helpers.server.js");
   const info = await getMasterChildInfo(shopDomain, adminHeaders, inventoryItemId);
 
   if (!info) {
@@ -118,7 +115,7 @@ export const action = async ({ request }) => {
     await setInventoryQuantity(shopDomain, adminHeaders, inventoryItemId, locationId, newQty);
 
     // Also store the new qty as oldQty in the DB for future reference
-    const { getInventoryItemIdFromVariantId } = await import("./webhooks.inventory-update.server.js");
+    const { getInventoryItemIdFromVariantId } = await import("./webhooks.inventory-update.helpers.server.js");
     const fallbackVariantId = await fetch(
       `https://${shopDomain}/admin/api/2024-10/graphql.json`,
       {
@@ -168,7 +165,8 @@ export const action = async ({ request }) => {
     sku = info.childSku;
   }
 
-  const { getQtyOldValueDB } = await import("./webhooks.inventory-update.server.js");
+  // Import the function to get oldQty from DB
+  const { getQtyOldValueDB } = await import("./webhooks.inventory-update.helpers.server.js");
   const oldQty = await getQtyOldValueDB(shopDomain, variantId);
   console.log(`(DB-based oldQty) => old:${oldQty}, new:${newQty}`);
 
@@ -179,6 +177,7 @@ export const action = async ({ request }) => {
     comboKey = `${info.masterInventoryItemId}-${locationId}`;
   }
 
+  // Build event object
   const eventObj = {
     shopDomain,
     adminHeaders,
