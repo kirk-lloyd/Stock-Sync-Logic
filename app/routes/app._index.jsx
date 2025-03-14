@@ -137,7 +137,7 @@ export default function Index() {
               <BlockStack gap="500">
                 {/* 1. Banner GIF embedded at the top before the welcome text */}
                 <img
-                  src="https://valentinanails.com/wp-content/uploads/2025/02/giffycanvas.gif"
+                  src="https://cdn.shopify.com/s/files/1/0692/4655/0256/files/giffycanvas.gif"
                   alt="Banner"
                   style={{ width: "100%", marginBottom: "1rem" }}
                 />

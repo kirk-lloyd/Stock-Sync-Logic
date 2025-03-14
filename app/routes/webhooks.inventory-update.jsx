@@ -38,6 +38,9 @@ import https from 'https';
  *
  * 8) Parallel processing of independent operations using Promise.all()
  *    to reduce overall processing time.
+ *
+ * 9) Detection of updates originating from our modal UI to prevent
+ *    unnecessary processing cycles and avoid infinite update loops.
  * ------------------------------------------------------------------
  */
 
@@ -142,15 +145,16 @@ function setCacheValue(cache, key, value, ttlMs = 60000) { // 1 minute default
 }
 
 function getCacheValue(cache, key) {
-  const entry = cache.get(key);
-  if (!entry) return null;
+  //const entry = cache.get(key);
+  //if (!entry) return null;
   
-  if (entry.expiry <= Date.now()) {
-    cache.delete(key);
-    return null;
-  }
+  //if (entry.expiry <= Date.now()) {
+  //  cache.delete(key);
+  //  return null;
+  //}
   
-  return entry.value;
+  //return entry.value;
+  return null;
 }
 
 // Function to invalidate caches when relationship changes are detected
@@ -1263,6 +1267,10 @@ function addEventToAggregator(comboKey, event) {
   }
 }
 
+/**
+ * Process aggregated events after the 5-second listening window closes
+ * With enhanced detection of modal-initiated inventory updates
+ */
 async function processAggregatorEvents(comboKey) {
   const aggregator = aggregatorMap.get(comboKey);
   if (!aggregator) return;
@@ -1273,6 +1281,27 @@ async function processAggregatorEvents(comboKey) {
   console.log(
     `⌛ Listening window closed => combo:${comboKey}, total events: ${events.length}`
   );
+
+  // Identify potentially modal-initiated updates for debugging
+  events.forEach(ev => {
+    // For child events, check if oldQty seems to have been updated prior to inventory
+    if (!ev.isMaster && ev.oldQty === ev.newQty) {
+      console.log(
+        `⚠️ Possible modal-initiated event detected for child ${ev.childVariantId}: ` +
+        `oldQty (${ev.oldQty}) = newQty (${ev.newQty}). This will be assessed ` +
+        `but may be ignored by handleChildEvent logic.`
+      );
+    }
+    
+    // For master events, check for small changes that might be UI adjustments
+    if (ev.isMaster && Math.abs(ev.newQty - ev.oldQty) < 2) {
+      console.log(
+        `⚠️ Small quantity change detected for master ${ev.variantId}: ` +
+        `oldQty (${ev.oldQty}) → newQty (${ev.newQty}), difference: ${ev.newQty - ev.oldQty}. ` +
+        `Might be a manual adjustment.`
+      );
+    }
+  });
 
   // We pick the last event for each child and optionally one final MASTER event
   const finalChildMap = new Map();
@@ -1310,7 +1339,8 @@ async function processAggregatorEvents(comboKey) {
 /**
  * CHILD => difference-based => newMaster = masterOld + (childDiff * childDivisor)
  * Then recalc siblings => if childDivisor=1 => child's qty = MASTER exactly
- * Optimised version with batch updates
+ * 
+ * Enhanced with verification to detect and skip modal-initiated updates
  */
 async function handleChildEvent(ev) {
   console.log(
@@ -1318,20 +1348,54 @@ async function handleChildEvent(ev) {
   );
   const { shopDomain, adminHeaders } = ev;
 
-  const childDiff = ev.newQty - ev.oldQty;
-
   // Determine the child's qtymanagement setting
   const childDivisor = await getVariantQtyManagement(shopDomain, adminHeaders, ev.childVariantId);
   console.log(`childDivisor => ${childDivisor}`);
 
-  // Retrieve the MASTER's old quantity
-  const masterOldQty = await getCurrentAvailableQuantity(
+  // Retrieve the MASTER's current quantity
+  const masterCurrentQty = await getCurrentAvailableQuantity(
     shopDomain,
     adminHeaders,
     ev.masterInventoryItemId,
     ev.locationId
   );
-  console.log(`masterOldQty => ${masterOldQty}`);
+  console.log(`masterCurrentQty => ${masterCurrentQty}`);
+
+  // Calculate the expected child inventory based on the master inventory and the child's ratio
+  let expectedChildQty;
+  if (childDivisor === 1) {
+    // If divisor is 1, child inventory should match master exactly
+    expectedChildQty = masterCurrentQty;
+  } else {
+    // Otherwise, apply Math.floor to the division result
+    expectedChildQty = Math.floor(masterCurrentQty / (childDivisor || 1));
+  }
+  console.log(`expectedChildQty => ${expectedChildQty}, actualNewQty => ${ev.newQty}`);
+
+  // Check if the new quantity matches what we would expect from a modal update
+  if (expectedChildQty === ev.newQty) {
+    console.log(
+      `🚩 Skipping webhook processing: Child inventory matches the expected value (${expectedChildQty}) ` +
+      `calculated from master qty (${masterCurrentQty}) and divisor (${childDivisor}). ` +
+      `This update likely originated from the modal.`
+    );
+    
+    // Since we're ignoring this update, ensure qtyold value is updated to match
+    // to avoid future inconsistencies
+    await Promise.all([
+      setQtyOldValueDB(shopDomain, ev.childVariantId, ev.newQty),
+      setQtyOldValue(shopDomain, adminHeaders, ev.childVariantId, ev.newQty)
+    ]);
+    
+    return; // Exit early, don't process this event further
+  }
+
+  // Continue with regular processing if this is a genuine inventory change
+  const childDiff = ev.newQty - ev.oldQty;
+
+  // Retrieve the MASTER's old quantity from our records
+  const masterOldQty = await getQtyOldValueDB(shopDomain, ev.masterVariantId) || masterCurrentQty;
+  console.log(`masterOldQty (from DB) => ${masterOldQty}`);
 
   // new MASTER => masterOldQty + (childDiff * childDivisor)
   const scaledDiff = childDiff * childDivisor;
@@ -1349,7 +1413,7 @@ async function handleChildEvent(ev) {
   });
 
   // 2) If MASTER's qty has changed, add it to the batch
-  let masterNeedsUpdate = newMasterQty !== masterOldQty;
+  let masterNeedsUpdate = newMasterQty !== masterCurrentQty;
   if (masterNeedsUpdate) {
     batchUpdates.push({
       inventoryItemId: ev.masterInventoryItemId,
@@ -1372,12 +1436,7 @@ async function handleChildEvent(ev) {
   // Note: If the batch update already includes the master, we could use newMasterQty directly
   const finalMasterQty = masterNeedsUpdate ? 
     newMasterQty : 
-    await getCurrentAvailableQuantity(
-      shopDomain,
-      adminHeaders,
-      ev.masterInventoryItemId,
-      ev.locationId
-    );
+    masterCurrentQty;
 
   // Collect data from all siblings in parallel
   const siblingData = await Promise.all(
@@ -1463,7 +1522,8 @@ async function handleChildEvent(ev) {
 /**
  * MASTER => recalc children => if childDivisor=1 => child=MASTER,
  * else floor(MASTER / childDivisor)
- * Optimised version using batch updates
+ * 
+ * Enhanced with modal-initiated update detection
  */
 async function handleMasterEvent(ev) {
   const { shopDomain, adminHeaders } = ev;
@@ -1476,6 +1536,30 @@ async function handleMasterEvent(ev) {
     ev.inventoryItemId,
     ev.locationId
   );
+  
+  // Compare with the old value from the database
+  const storedOldQty = await getQtyOldValueDB(shopDomain, ev.variantId);
+  
+  // If event oldQty and stored oldQty differ but the final quantity matches,
+  // this update likely came from our modal (which updates oldQty before inventory)
+  const likelyFromUI = storedOldQty !== ev.oldQty && shopMasterQty === ev.newQty;
+  
+  if (likelyFromUI) {
+    console.log(
+      `🚩 Potential UI-initiated update detected: ` +
+      `stored oldQty (${storedOldQty}) ≠ event oldQty (${ev.oldQty}), ` +
+      `but newQty (${ev.newQty}) = shopMasterQty (${shopMasterQty}). ` +
+      `Updating oldQty without propagating to children.`
+    );
+    
+    // Only update oldQty to maintain synchronisation
+    await Promise.all([
+      setQtyOldValueDB(shopDomain, ev.variantId, ev.newQty),
+      setQtyOldValue(shopDomain, adminHeaders, ev.variantId, ev.newQty)
+    ]);
+    
+    return; // Exit early, don't process this event further
+  }
   
   // Array for all inventory updates (master + children)
   const batchUpdates = [];

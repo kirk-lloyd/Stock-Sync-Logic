@@ -12,7 +12,7 @@ import { authenticate } from "../shopify.server"; // Adjust path as needed
  *  - master: a boolean ("true" if the variant is a master)
  *  - children: an array of child variant IDs (will be stored as a JSON string in the metafield)
  *
- * The mutation updates the variant via Shopify’s productVariantUpdate mutation.
+ * The mutation updates the variant via Shopify's productVariantUpdate mutation.
  * In this example, we update the title and inventory. We also update the custom metafields
  * for the master flag and children assignments.
  */
@@ -81,10 +81,10 @@ export const action = async ({ request }) => {
   }
 
   // Now, update the custom metafields if needed.
-  // For master flag:
+  // For master flag (using boolean type):
   const updateMasterMetafieldMutation = `
-    mutation UpdateMasterMetafield($variantId: ID!, $value: String!) {
-      productVariantUpdate(input: { id: $variantId, metafields: [{ namespace: "projektstocksyncmaster", key: "master", value: $value, type: "single_line_text_field" }] }) {
+    mutation UpdateMasterMetafield($variantId: ID!, $value: Boolean!) {
+      productVariantUpdate(input: { id: $variantId, metafields: [{ namespace: "projektstocksyncmaster", key: "master", value: $value, type: "boolean" }] }) {
         productVariant {
           id
           masterMetafield: metafield(namespace: "projektstocksyncmaster", key: "master") {
@@ -100,14 +100,14 @@ export const action = async ({ request }) => {
     }
   `;
   await admin.graphql(updateMasterMetafieldMutation, {
-    variables: { variantId, value: master ? "true" : "false" },
+    variables: { variantId, value: master }, // Use boolean directly
   });
 
-  // For children assignment:
-  const childrenValue = JSON.stringify(children);
+  // For children assignment (using list.variant_reference type):
+  // Note: This expects an array of variant IDs
   const updateChildrenMetafieldMutation = `
     mutation UpdateChildrenMetafield($variantId: ID!, $value: String!) {
-      productVariantUpdate(input: { id: $variantId, metafields: [{ namespace: "projektstocksyncchildren", key: "childrenkey", value: $value, type: "json" }] }) {
+      productVariantUpdate(input: { id: $variantId, metafields: [{ namespace: "projektstocksyncchildren", key: "childrenkey", value: $value, type: "list.variant_reference" }] }) {
         productVariant {
           id
           childrenMetafield: metafield(namespace: "projektstocksyncchildren", key: "childrenkey") {
@@ -122,8 +122,11 @@ export const action = async ({ request }) => {
       }
     }
   `;
+  
+  // Pass the array directly if it's already in the correct format
+  // or convert it to the proper format if needed
   await admin.graphql(updateChildrenMetafieldMutation, {
-    variables: { variantId, value: childrenValue },
+    variables: { variantId, value: JSON.stringify(children) },
   });
 
   // Finally, perform a synchronous query to fetch the updated variant data.

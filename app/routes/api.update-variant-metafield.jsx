@@ -11,8 +11,8 @@ export async function action({ request }) {
   const { admin } = await authenticate.admin(request);
   
   // 2) Parse the request body.
-  let { variantId, namespace, key, value } = await request.json();
-  console.log("update-variant-metafield =>", { variantId, namespace, key, value });
+  let { variantId, namespace, key, value, type } = await request.json();
+  console.log("update-variant-metafield => Inicio", { variantId, namespace, key, value, type });
   
   try {
     // 3) Build the GraphQL mutation to set a variant-level metafield.
@@ -34,63 +34,112 @@ export async function action({ request }) {
       }
     `;
     
-    // 4) Determine the metafield type based on the key.
-    let metafieldType = "single_line_text_field";
+    // 4) Determine the metafield type based on the key or use provided type.
+    let metafieldType = type || "boolean";
     
-    if (key === "master") {
-      metafieldType = "boolean";
-    } 
-    else if (key === "childrenkey") {
-      metafieldType = "list.variant_reference";
-      // Stringify the value if it's an array.
-      if (Array.isArray(value)) {
-        value = JSON.stringify(value);
+    // Override type based on known metafields if not explicitly provided
+    if (!type) {
+      if (key === "master") {
+        metafieldType = "boolean";
+      } 
+      else if (key === "childrenkey") {
+        metafieldType = "list.variant_reference";
+      } 
+      else if (key === "parentmaster") {
+        metafieldType = "list.variant_reference";
       }
+      else if (key === "qtymanagement" || key === "qtyold") {
+        metafieldType = "number_integer";
+      }
+    }
+    
+    // 5) Process the value based on the metafield type
+    let processedValue = value;
+    
+    if (metafieldType === "boolean") {
+      // No convierta a boolean de JavaScript, sino mantenga como string
+      processedValue = (value === true || value === "true") ? "true" : "false";
+      console.log(`Procesando valor booleano: ${value} -> ${processedValue}`);
     } 
-    else if (key === "parentmaster") {
-      // For parent master reference - stores which master this variant belongs to
-      metafieldType = "list.variant_reference";
-      
+    else if (metafieldType === "list.variant_reference") {
       // Handle the value formatting for list.variant_reference
       if (!value || value === '') {
         // Empty array for clearing the reference
-        value = JSON.stringify([]);
+        processedValue = JSON.stringify([]);
+      } else if (Array.isArray(value)) {
+        // Stringify the array
+        processedValue = JSON.stringify(value);
+      } else if (typeof value === 'string' && (value.startsWith('[') || value.startsWith('{'))) {
+        // Already JSON string, validate and use as is
+        try {
+          JSON.parse(value); // Just to validate
+          processedValue = value;
+        } catch (e) {
+          console.error("Invalid JSON string:", value);
+          throw new Error(`Invalid JSON format for ${key}: ${e.message}`);
+        }
       } else {
-        // Ensure the value is wrapped in an array and properly JSON stringified
-        // If it's already an array, use it as is; otherwise, wrap the single value
-        const valueArray = Array.isArray(value) ? value : [value];
-        value = JSON.stringify(valueArray);
+        // Single value, wrap in array
+        processedValue = JSON.stringify([value]);
+      }
+      console.log(`Procesando valor list.variant_reference: ${JSON.stringify(value)} -> ${processedValue}`);
+    }
+    else if (metafieldType === "number_integer") {
+      try {
+        // Ensure the value is a valid integer
+        const numValue = typeof value === 'string' ? parseFloat(value) : Number(value);
+        // Apply Math.floor to ensure it's an integer and convert to string
+        const intValue = Math.floor(numValue);
+        
+        if (isNaN(intValue)) {
+          throw new Error(`Invalid number: ${value}`);
+        }
+        
+        // Convert to string for Shopify
+        processedValue = String(intValue);
+        console.log(`Procesando valor number_integer: ${value} -> ${processedValue}`);
+      } catch (e) {
+        console.error("Error processing number_integer:", e);
+        throw new Error(`Error processing ${key} as number_integer: ${e.message}`);
       }
     }
-    else if (key === "qtymanagement") {
-      // For qtymanagement, we expect an integer value.
-      metafieldType = "number_integer";
-      // Ensure the value is an integer represented as a string.
-      value = String(parseInt(value, 10));
-    }
     
-    // 5) Prepare variables for the mutation.
+    // 6) Prepare variables for the mutation.
     const variables = {
       input: [
         {
           ownerId: variantId,
           namespace,
           key,
-          value,
+          value: processedValue,
           type: metafieldType,
         },
       ],
     };
     
-    // 6) Send the GraphQL request.
+    console.log(`Enviando a Shopify - Tipo: ${metafieldType}, Valor procesado:`, processedValue);
+    
+    // 7) Send the GraphQL request.
     const response = await admin.graphql(mutation, { variables });
     const data = await response.json();
     
-    // 7) Check for user errors from Shopify.
+    // 8) Check for user errors from Shopify.
     if (data?.data?.metafieldsSet?.userErrors?.length) {
       const errors = data.data.metafieldsSet.userErrors;
       console.error("Shopify metafieldsSet userErrors:", errors);
-      return json({ success: false, errors }, { status: 400 });
+      
+      // Detalle adicional del error para debug
+      console.error(`Detalles completos: Tipo=${metafieldType}, Valor=${processedValue}, Variables=`, variables);
+      
+      return json({ 
+        success: false, 
+        errors,
+        details: {
+          type: metafieldType,
+          processedValue,
+          originalValue: value
+        }
+      }, { status: 400 });
     }
     
     console.log(
@@ -98,13 +147,22 @@ export async function action({ request }) {
       data?.data?.metafieldsSet?.metafields
     );
     
-    // 8) Return success.
+    // 9) Return success.
     return json({
       success: true,
       metafields: data?.data?.metafieldsSet?.metafields || [],
     });
   } catch (error) {
-    console.error("Error in /api/update-variant-metafield action:", error);
-    return json({ success: false, error: error.message }, { status: 500 });
+    console.error("Error en /api/update-variant-metafield action:", error);
+    return json({ 
+      success: false, 
+      error: error.message,
+      details: {
+        namespace,
+        key,
+        value,
+        providedType: type
+      }
+    }, { status: 500 });
   }
 }
