@@ -1,4 +1,6 @@
-import { useEffect } from "react";
+//app._index.jsx
+
+import { useState, useEffect } from "react";
 import { useFetcher } from "@remix-run/react";
 import {
   Page,
@@ -14,7 +16,7 @@ import {
 } from "@shopify/polaris";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
-import { Helmet } from "react-helmet";
+
 
 // Loader function to authenticate the admin user.
 export const loader = async ({ request }) => {
@@ -110,12 +112,62 @@ export default function Index() {
 
   // Note: The generateProduct function is no longer used as the button now navigates to /products/
 
+  // Importar useState y useEffect al inicio del archivo
+
+// Crear un componente separado (añadir dentro del archivo antes del componente principal)
+const YouTubeThumbnail = ({ videoId }) => {
+  const [isClient, setIsClient] = useState(false);
+  
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
+  
+  // Renderizado del servidor (simplificado)
+  if (!isClient) {
+    return (
+      <div style={{ width: '560px', maxWidth: '100%', height: '315px', backgroundColor: '#f1f1f1', borderRadius: '8px' }}>
+      </div>
+    );
+  }
+  
+  // Renderizado del cliente (completo)
+  return (
+    <a href={`https://www.youtube.com/watch?v=${videoId}`} target="_blank" rel="noopener noreferrer">
+      <div style={{ position: 'relative', width: '560px', maxWidth: '100%' }}>
+        <img 
+          src={`https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`} 
+          alt="Tutorial Video" 
+          style={{ width: '100%', height: 'auto', borderRadius: '8px' }} 
+        />
+        <div style={{ 
+          position: 'absolute', 
+          top: '50%', 
+          left: '50%', 
+          transform: 'translate(-50%, -50%)', 
+          width: '68px', 
+          height: '48px', 
+          backgroundColor: 'rgba(0,0,0,0.7)', 
+          borderRadius: '12px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center'
+        }}>
+          <div style={{ 
+            width: '0', 
+            height: '0', 
+            borderTop: '10px solid transparent', 
+            borderBottom: '10px solid transparent', 
+            borderLeft: '18px solid white', 
+            marginLeft: '5px' 
+          }}></div>
+        </div>
+      </div>
+    </a>
+  );
+};
+
   return (
     <Page>
-      <Helmet>
-        <script src="https://cdn.botpress.cloud/webchat/v2.3/inject.js"></script>
-        <script src="https://files.bpcontent.cloud/2025/02/24/22/20250224223007-YAA5E131.js"></script>
-      </Helmet>
       {/* Title bar with a button to create a new master (this button still triggers the POST action) */}
       <TitleBar title="Synchronize your inventory">
         {/*<button
@@ -154,15 +206,9 @@ export default function Index() {
 
                 {/* 3. Embedded YouTube video between the welcome text and the next section */}
                 <div style={{ display: "flex", justifyContent: "center", margin: "1rem 0" }}>
-                  <iframe
-                    width="560"
-                    height="315"
-                    src="https://www.youtube.com/embed/oEsBAfQXUHo"
-                    title="YouTube video player"
-                    frameBorder="0"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                    allowFullScreen
-                  ></iframe>
+                  <div style={{ display: "flex", justifyContent: "center", margin: "1rem 0" }}>
+                    <YouTubeThumbnail videoId="oEsBAfQXUHo" />
+                  </div>
                 </div>
 
                 {/* 4. "Get started with products" Section */}

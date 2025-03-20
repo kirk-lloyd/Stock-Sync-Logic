@@ -9,41 +9,65 @@ import {
   BlockStack,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
-import { Helmet } from "react-helmet";
+import { useState, useEffect } from "react";
+
+// Create a component for the iframe
+const YouTubeEmbed = ({ embedId }) => {
+  const [isMounted, setIsMounted] = useState(false);
+  
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+  
+  // During server rendering, show a placeholder
+  if (!isMounted) {
+    return (
+      <div style={{ 
+        width: '560px', 
+        height: '315px', 
+        backgroundColor: '#f1f1f1',
+        margin: '0 auto',
+        borderRadius: '8px'
+      }}></div>
+    );
+  }
+  
+  // On the client, show the real iframe
+  return (
+    <iframe
+      width="560"
+      height="315"
+      src={`https://www.youtube.com/embed/${embedId}`}
+      title="YouTube video player"
+      frameBorder="0"
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+      allowFullScreen
+    ></iframe>
+  );
+};
 
 // AdditionalPage renders the help page for Projekt: Stock Control Master, providing detailed documentation.
 export default function AdditionalPage() {
+  const [isClient, setIsClient] = useState(false);
+  
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
+
   return (
     <Page>
-      <Helmet>
-        {/* External scripts for webchat and other integrations */}
-        <script src="https://cdn.botpress.cloud/webchat/v2.3/inject.js"></script>
-        <script src="https://files.bpcontent.cloud/2025/02/24/22/20250224223007-YAA5E131.js"></script>
-      </Helmet>
-        <TitleBar title="Help">
-          {/*<button
-            variant="primary"
-            onClick={() => window.location.href = '/app/products/'}
-          >
-            Manage all products 📦
-          </button>
-          <button
-            onClick={() => window.location.href = '/master/'}
-          >
-            Master List 👑
-          </button>*/}
-        </TitleBar>
+      <TitleBar title="Help" />
       <Layout>
         <Layout.Section>
           <BlockStack gap="500">
             {/* Card 1: Introduction to Projekt: Stock Control Master */}
             <Card>
               <BlockStack gap="400">
-                <Text as="H1" variant="headingLg">
+                <Text as="h1" variant="headingLg">
                   What is Projekt: Stock Control Master?
                 </Text>
                 <Text as="p" variant="bodyMd">
-                  Projekt: Stock Control Master  is a user-friendly inventory synchronisation tool
+                  Projekt: Stock Control Master is a user-friendly inventory synchronisation tool
                   designed to help you avoid errors in stock management.
                   It automatically updates your inventory across products,
                   ensuring your stock levels are always accurate.
@@ -53,11 +77,11 @@ export default function AdditionalPage() {
             {/* Card 2: How to use Projekt: Stock Control Master */}
             <Card>
               <BlockStack gap="400">
-                <Text as="H1" variant="headingLg">
+                <Text as="h1" variant="headingLg">
                   How to use Projekt: Stock Control Master 
                 </Text>
                 <Text as="p" variant="bodyMd">
-                  Using Projekt: Stock Control Master  is straightforward and helps prevent mistakes
+                  Using Projekt: Stock Control Master is straightforward and helps prevent mistakes
                   in inventory management. To set it up, follow these steps:
                   <br />
                   <br /><strong></strong>
@@ -65,32 +89,26 @@ export default function AdditionalPage() {
                   stock.
                   <br />
                   2. Assign secondary products (Children) that will share the
-                  Master’s inventory.
+                  Master's inventory.
                   <br />
                   3. Set up custom rules. If a Child product represents a pack or
-                  a fraction of the Master, configure a “Master Ratio” to adjust
+                  a fraction of the Master, configure a "Master Ratio" to adjust
                   the stock accordingly.
                   <br />
                   4. Save your changes and let Projekt: Stock Control Master do the rest.
                 </Text>
-                {/* 3. Embedded YouTube video between the welcome text and the next section */}
-                <div style={{ display: "flex", justifyContent: "center", margin: "1rem 0" }}>
-                  <iframe
-                    width="560"
-                    height="315"
-                    src="https://www.youtube.com/embed/SzNUaNqiHB8"
-                    title="YouTube video player"
-                    frameBorder="0"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                    allowFullScreen
-                  ></iframe>
-                </div>
+                {/* YouTube video with client-side rendering */}
+                {isClient && (
+                  <div style={{ display: "flex", justifyContent: "center", margin: "1rem 0" }}>
+                    <YouTubeEmbed embedId="SzNUaNqiHB8" />
+                  </div>
+                )}
               </BlockStack>
             </Card>
             {/* Card 3: What is a Master */}
             <Card>
               <BlockStack gap="400">
-                <Text as="H1" variant="headingLg">
+                <Text as="h1" variant="headingLg">
                   What is a Master
                 </Text>
                 <Text as="p" variant="bodyMd">
@@ -101,29 +119,17 @@ export default function AdditionalPage() {
                   individual bottle – making it the Master, with the pack being a
                   linked Child.
                 </Text>
-                {/* 3. Embedded YouTube video between the welcome text and the next section */}
-                {/*<div style={{ display: "flex", justifyContent: "center", margin: "1rem 0" }}>
-                  <iframe
-                    width="560"
-                    height="315"
-                    src="https://www.youtube.com/embed/RKYKu71hIL4"
-                    title="YouTube video player"
-                    frameBorder="0"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                    allowFullScreen
-                  ></iframe>
-                </div>*/}
               </BlockStack>
             </Card>
             {/* Card 4: What is a Child */}
             <Card>
               <BlockStack gap="400">
-                <Text as="H1" variant="headingLg">
+                <Text as="h1" variant="headingLg">
                   What is a Child
                 </Text>
                 <Text as="p" variant="bodyMd">
                   A Child is a product that shares its inventory with the Master.
-                  Every time a Child is sold, the Master’s stock is automatically
+                  Every time a Child is sold, the Master's stock is automatically
                   adjusted. This is ideal for items sold both individually and in
                   packs, or for variations such as different colours or sizes of the
                   same product.
@@ -133,7 +139,7 @@ export default function AdditionalPage() {
             {/* Card 5: How to assign a Child to a Master */}
             <Card>
               <BlockStack gap="400">
-                <Text as="H1" variant="headingLg">
+                <Text as="h1" variant="headingLg">
                   How to assign a Child to a Master
                 </Text>
                 <Text as="p" variant="bodyMd">
@@ -145,33 +151,21 @@ export default function AdditionalPage() {
                   <br />
                   2. Select the product that will serve as the Master.
                   <br />
-                  3. Add the Child products that will share the Master’s inventory.
+                  3. Add the Child products that will share the Master's inventory.
                   <br />
-                  4. Configure the “Master Ratio” if the Child represents a pack or
+                  4. Configure the "Master Ratio" if the Child represents a pack or
                   fraction of the Master.
                   <br />
                   5. Save your changes – any stock
                   change in the Master will automatically update the Child
                   products.
                 </Text>
-                {/* 3. Embedded YouTube video between the welcome text and the next section */}
-                {/*<div style={{ display: "flex", justifyContent: "center", margin: "1rem 0" }}>
-                  <iframe
-                    width="560"
-                    height="315"
-                    src="https://www.youtube.com/embed/g5D4Z25ILA4"
-                    title="YouTube video player"
-                    frameBorder="0"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                    allowFullScreen
-                  ></iframe>
-                </div>*/}
               </BlockStack>
             </Card>
             {/* Card 6: What is a Master Ratio */}
             <Card>
               <BlockStack gap="400">
-                <Text as="H1" variant="headingLg">
+                <Text as="h1" variant="headingLg">
                   What is a Master Ratio
                 </Text>
                 <Text as="p" variant="bodyMd">
@@ -194,26 +188,6 @@ export default function AdditionalPage() {
             </Card>
           </BlockStack>
         </Layout.Section>
-        {/*Layout.Section variant="oneThird">
-          <Card>
-            <BlockStack gap="200">
-              <Text as="h2" variant="headingMd">
-                Resources
-              </Text>
-              <List>
-                <List.Item>
-                  <Link
-                    url="https://shopify.dev/docs/apps/design-guidelines/navigation#app-nav"
-                    target="_blank"
-                    removeUnderline
-                  >
-                    App nav best practices
-                  </Link>
-                </List.Item>
-              </List>
-            </BlockStack>
-          </Card>
-        </Layout.Section>*/}
       </Layout>
     </Page>
   );

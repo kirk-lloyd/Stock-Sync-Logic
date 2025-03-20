@@ -14,7 +14,15 @@ import { Spinner, Text, TextContainer, Button } from "@shopify/polaris";
  */
 export function BulkLoadingOverlay({ active, status, onRefresh }) {
   const [currentMessageIndex, setCurrentMessageIndex] = useState(0);
-  const [animationState, setAnimationState] = useState('entering');
+  // Cambiado de 'entering' a 'idle' para evitar animaciones durante la hidratación
+  const [animationState, setAnimationState] = useState('idle');
+  // Estado para controlar renderizado cliente/servidor
+  const [isClient, setIsClient] = useState(false);
+
+  // Efecto para marcar cuando estamos en el cliente
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
 
   // Array of messages to display in the carousel
   const messages = [
@@ -25,9 +33,12 @@ export function BulkLoadingOverlay({ active, status, onRefresh }) {
     "Large product catalogues with many variants may take several minutes to process completely."
   ];
 
-  // Handle the message carousel animation
+  // Handle the message carousel animation - solo en el cliente
   useEffect(() => {
-    if (!active) return;
+    if (!active || !isClient) return;
+
+    // Iniciar con estado 'entering' una vez estamos en el cliente
+    setAnimationState('entering');
 
     // Function to cycle through messages
     const cycleMessages = () => {
@@ -46,7 +57,7 @@ export function BulkLoadingOverlay({ active, status, onRefresh }) {
     
     // Clean up interval on unmount or when inactive
     return () => clearInterval(interval);
-  }, [active, messages.length]);
+  }, [active, messages.length, isClient]);
 
   // Don't render anything if not active
   if (!active) return null;
@@ -83,6 +94,11 @@ export function BulkLoadingOverlay({ active, status, onRefresh }) {
           
           .message-exiting {
             animation: fadeOutUp 0.5s ease forwards;
+          }
+          
+          .message-idle {
+            opacity: 1;
+            transform: translateY(0);
           }
           
           @keyframes pulse {
@@ -155,7 +171,7 @@ export function BulkLoadingOverlay({ active, status, onRefresh }) {
           textAlign: "center"
         }}
       >
-        <div style={{ marginBottom: "30px" }} className="pulse-animation">
+        <div style={{ marginBottom: "30px" }} className={isClient ? "pulse-animation" : ""}>
           <Spinner accessibilityLabel="Loading" size="large" />
         </div>
         

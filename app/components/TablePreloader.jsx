@@ -10,7 +10,7 @@ export function TablePreloader() {
   return (
     <Card padding="0">
       {/* Search bar placeholder */}
-      <Box paddingBlock="300" paddingInline="300" marginBottom="10">
+      <Box paddingBlock="300" paddingInline="300" style={{ marginBottom: "10px" }}>
         <SkeletonDisplayText size="small" />
       </Box>
       

@@ -34,8 +34,18 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
   const [expandedMasters, setExpandedMasters] = useState([]);
   const [expandedProductIndex, setExpandedProductIndex] = useState(-1);
   
-  // Automatically expand master variants on load
+  // Estado para controlar si estamos en el cliente (para evitar problemas de hidratación)
+  const [isClient, setIsClient] = useState(false);
+  
+  // Marca que estamos en el cliente después del primer render
   useEffect(() => {
+    setIsClient(true);
+  }, []);
+  
+  // Automatically expand master variants on load (solo en el cliente)
+  useEffect(() => {
+    if (!isClient) return;
+    
     const mastersWithChildren = [];
     products.forEach((prod) => {
       if (prod.variants && prod.variants.edges) {
@@ -48,7 +58,7 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
       }
     });
     setExpandedMasters(mastersWithChildren);
-  }, [products]);
+  }, [products, isClient]);
 
   // UI state management
   const [query, setQuery] = useState("");
@@ -69,6 +79,8 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
 
   // Collect all variants for search functionality
   useEffect(() => {
+    if (!isClient) return;
+    
     const variantsList = [];
     products.forEach((prod) => {
       if (prod.variants && prod.variants.edges) {
@@ -82,7 +94,7 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
       }
     });
     setAllVariants(variantsList);
-  }, [products]);
+  }, [products, isClient]);
 
   // Function to open the sync modal for a given variant
   function openSyncModal(variantId) {
@@ -149,21 +161,21 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
     return gid.split("/").pop();
   }
   
-  // Custom thumbnail component with "No Image" placeholder for missing images
+  // Custom thumbnail component con soporte SSR
   function CustomThumbnail({ source, alt, size = "medium" }) {
-    if (source) {
-      return <Thumbnail source={source} alt={alt} size={size} />;
-    }
+    const [imageLoaded, setImageLoaded] = useState(false);
+    const [hasError, setHasError] = useState(false);
     
-    // Placeholder styling based on thumbnail size
+    // Dimensiones basadas en el parámetro de tamaño
     const sizeStyles = {
       small: { width: "40px", height: "40px", fontSize: "10px" },
       medium: { width: "60px", height: "60px", fontSize: "12px" },
       large: { width: "80px", height: "80px", fontSize: "14px" }
     };
     
+    // Estilo base para placeholder
     const style = {
-      ...sizeStyles[size],
+      ...(sizeStyles[size] || sizeStyles.medium),
       backgroundColor: "#e4e5e7",
       display: "flex",
       alignItems: "center",
@@ -173,9 +185,46 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
       fontWeight: "500"
     };
     
+    // Efectos para cargar la imagen
+    useEffect(() => {
+      if (!source) return;
+      
+      const img = new Image();
+      img.src = source;
+      
+      img.onload = () => {
+        setImageLoaded(true);
+        setHasError(false);
+      };
+      
+      img.onerror = () => {
+        setHasError(true);
+      };
+      
+      return () => {
+        img.onload = null;
+        img.onerror = null;
+      };
+    }, [source]);
+    
+    // Si no hay source o hay error, mostrar placeholder
+    if (!source || hasError) {
+      return (
+        <div style={style}>
+          <span>{alt ? alt.charAt(0).toUpperCase() : 'N'}</span>
+        </div>
+      );
+    }
+    
+    // Si estamos en cliente y la imagen cargó exitosamente
+    if (isClient && imageLoaded) {
+      return <Thumbnail source={source} alt={alt || ""} size={size} />;
+    }
+    
+    // Placeholder mientras carga o para SSR
     return (
       <div style={style}>
-        <span>No Image</span>
+        <span>{alt ? alt.charAt(0).toUpperCase() : 'N'}</span>
       </div>
     );
   }
@@ -234,8 +283,10 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
     currentPage * itemsPerPage
   );
 
-  // Add custom CSS for row styling
+  // Add custom CSS for row styling - Solo en cliente
   useEffect(() => {
+    if (!isClient) return;
+    
     const style = document.createElement("style");
     style.innerHTML = `
       .activeRow { background-color: rgb(173, 173, 173) !important; }
@@ -247,12 +298,12 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
         document.head.removeChild(style);
       }
     };
-  }, []);
+  }, [isClient]);
 
   return (
     <>
       <Card padding="0">
-        <Box paddingBlock="300" paddingInline="300" marginBottom="10">
+        <Box paddingBlock="300" paddingInline="300" style={{ marginBottom: "10px" }}>
           <TextField
             label=""
             placeholder="Search by product title"
@@ -468,13 +519,13 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
         />
       </Card>
       
-      {/* Toast notification */}
-      {toastActive && (
+      {/* Toast notification - solo en cliente */}
+      {isClient && toastActive && (
         <Toast content={toastMessage} onDismiss={onDismissToast} />
       )}
       
-      {/* Sync Variant Modal */}
-      {syncVariantId && (
+      {/* Sync Variant Modal - solo en cliente */}
+      {isClient && syncVariantId && (
         <SyncVariantModal
           variantId={syncVariantId}
           onClose={() => setSyncVariantId(null)}

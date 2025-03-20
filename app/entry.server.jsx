@@ -4,7 +4,7 @@ import { RemixServer } from "@remix-run/react";
 import { createReadableStreamFromReadable } from "@remix-run/node";
 import { isbot } from "isbot";
 import { addDocumentResponseHeaders } from "./shopify.server";
-import { loader as metafieldsLoader } from "./routes/models/metafields.app"; // Import the loader function
+import { loader as metafieldsLoader } from "./routes/models/metafields.app";
 
 export const streamTimeout = 5000;
 
@@ -14,9 +14,14 @@ export default async function handleRequest(
   responseHeaders,
   remixContext,
 ) {
+  // Primero llamamos a la función original de Shopify
   addDocumentResponseHeaders(request, responseHeaders);
-
-  // Call the metafields loader function
+  
+  // Luego agregamos nuestras propias cabeceras cruciales para iframes
+  responseHeaders.set('Content-Security-Policy', "frame-ancestors https://*.myshopify.com https://admin.shopify.com;");
+  responseHeaders.set('X-Frame-Options', 'ALLOW-FROM https://admin.shopify.com');
+  
+  // El resto permanece igual
   await metafieldsLoader({ request });
 
   const userAgent = request.headers.get("user-agent");
@@ -49,8 +54,6 @@ export default async function handleRequest(
       },
     );
 
-    // Automatically timeout the React renderer after 6 seconds, which ensures
-    // React has enough time to flush down the rejected boundary contents
     setTimeout(abort, streamTimeout + 1000);
   });
 }

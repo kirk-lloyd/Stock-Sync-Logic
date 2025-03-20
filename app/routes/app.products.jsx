@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Page, Frame, Banner, Box, Button } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
-import { Helmet } from "react-helmet";
 import { useLoaderData, useRevalidator } from "@remix-run/react";
 import { LoadingOverlay } from "../components/LoadingOverlay.jsx";
 import { BulkLoadingOverlay } from "../components/BulkLoadingOverlay.jsx";
@@ -174,9 +173,6 @@ export const loader = async ({ request }) => {
  * This displays all products and their variants
  */
 export default function ProductsView() {
-  // Prevents server-side rendering issues
-  if (typeof window === "undefined") return null;
-  
   // Extract data from loader
   const {
     products,
@@ -198,16 +194,26 @@ export default function ProductsView() {
   
   // State to control component rendering
   const [isTableReady, setIsTableReady] = useState(false);
+  
+  // State for client-side rendering check
+  const [isClient, setIsClient] = useState(false);
+
+  // Check if we're on the client
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
 
   // Control the rendering of components to prevent layout jumps
   useEffect(() => {
+    if (!isClient) return;
+    
     // Use a short timeout to ensure all resources are loaded
     const timer = setTimeout(() => {
       setIsTableReady(true);
     }, 300);
     
     return () => clearTimeout(timer);
-  }, []);
+  }, [isClient]);
 
   // Function to initiate product sync
   async function handleSyncProducts() {
@@ -243,11 +249,13 @@ export default function ProductsView() {
     return (
       <Frame>
         <Page>
-          <BulkLoadingOverlay 
-            active={true}
-            status={bulkStatus}
-            onRefresh={() => revalidator.revalidate()}
-          />
+          {isClient && (
+            <BulkLoadingOverlay 
+              active={true}
+              status={bulkStatus}
+              onRefresh={() => revalidator.revalidate()}
+            />
+          )}
         </Page>
       </Frame>
     );
@@ -256,10 +264,6 @@ export default function ProductsView() {
   return (
     <Frame>
       <Page>
-        <Helmet>
-          <script src="https://cdn.botpress.cloud/webchat/v2.3/inject.js"></script>
-          <script src="https://files.bpcontent.cloud/2025/02/24/22/20250224223007-YAA5E131.js"></script>
-        </Helmet>
         <TitleBar title="All Products" />
         
         {/* Top-right Sync Products button */}
@@ -296,21 +300,25 @@ export default function ProductsView() {
           {!isTableReady && <TablePreloader />}
           
           <div style={{ visibility: isTableReady ? 'visible' : 'hidden' }}>
-            {/* Reusable ProductsTable component */}
-            <ProductsTable 
-              initialProducts={products}
-              locked={locked}
-              showMasterVariantsOnly={false} // Show all variants
-            />
+            {/* Only render the ProductsTable component on the client side */}
+            {isClient && (
+              <ProductsTable 
+                initialProducts={products}
+                locked={locked}
+                showMasterVariantsOnly={false} // Show all variants
+              />
+            )}
           </div>
         </div>
       </Page>
       
       {/* Loading Overlay */}
-      <LoadingOverlay 
-        active={syncLoading} 
-        message="We're downloading all products from your store. The processing time depends on the number of products you have."
-      />
+      {isClient && (
+        <LoadingOverlay 
+          active={syncLoading} 
+          message="We're downloading all products from your store. The processing time depends on the number of products you have."
+        />
+      )}
     </Frame>
   );
 }

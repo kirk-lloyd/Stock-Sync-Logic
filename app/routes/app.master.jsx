@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { Page, Frame, Banner, Box, Button } from "@shopify/polaris";
+import { Page, Frame, Banner, Box, Button, Card, Text } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
-import { Helmet } from "react-helmet";
-import { useLoaderData, useRevalidator } from "@remix-run/react";
+import { useLoaderData, useRevalidator, useRouteError } from "@remix-run/react";
 import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -22,55 +21,25 @@ import {
  * Loader function that fetches product data with a focus on master variants
  */
 export const loader = async ({ request }) => {
-  console.log("Master View Loader: Authenticating and preparing Bulk Operation…");
-  const { session, admin } = await authenticate.admin(request);
-  const shopDomain = session?.shop;
-  if (!shopDomain) {
-    return json({ error: "No shop found in session" }, { status: 401 });
-  }
-  
-  // Get shop subscription details
-  let shopSub = await prisma.shopSubscription.findUnique({ where: { shop: shopDomain } });
-  let locked = !shopSub || shopSub.status !== "ACTIVE";
-  let plan = shopSub?.plan || "UNKNOWN";
-  let variantsLimit = shopSub?.variantsLimit ?? 0;
-  let status = shopSub?.status || "INACTIVE";
+  try {
+    console.log("Master View Loader: Authenticating and preparing Bulk Operation…");
+    const { session, admin } = await authenticate.admin(request);
+    const shopDomain = session?.shop;
+    if (!shopDomain) {
+      return json({ error: "No shop found in session" }, { status: 401 });
+    }
+    
+    // Get shop subscription details
+    let shopSub = await prisma.shopSubscription.findUnique({ where: { shop: shopDomain } });
+    let locked = !shopSub || shopSub.status !== "ACTIVE";
+    let plan = shopSub?.plan || "UNKNOWN";
+    let variantsLimit = shopSub?.variantsLimit ?? 0;
+    let status = shopSub?.status || "INACTIVE";
 
-  // Check and process bulk operation
-  let currentOp = await checkBulkOperationStatus(admin);
-  if (!currentOp) {
-    console.log("No valid Bulk Operation. Starting one…");
-    await startBulkOperation(admin);
-    return json({
-      products: [],
-      locked,
-      plan,
-      status,
-      variantsLimit,
-      totalSyncedVariants: 0,
-      overLimit: false,
-      mustRemove: 0,
-      bulkStatus: "CREATED",
-      bulkInProgress: true,
-    });
-  } else if (["CREATED", "RUNNING"].includes(currentOp.status)) {
-    console.log("Bulk operation in progress – returning loading state…");
-    return json({
-      products: [],
-      locked,
-      plan,
-      status,
-      variantsLimit,
-      totalSyncedVariants: 0,
-      overLimit: false,
-      mustRemove: 0,
-      bulkStatus: currentOp.status,
-      bulkInProgress: true,
-    });
-  } else if (currentOp.status === "COMPLETED") {
-    const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
-    if (new Date(currentOp.completedAt) < fifteenMinutesAgo) {
-      console.log("Bulk result is old (older than 15 minutes). Starting a new bulk operation.");
+    // Check and process bulk operation
+    let currentOp = await checkBulkOperationStatus(admin);
+    if (!currentOp) {
+      console.log("No valid Bulk Operation. Starting one…");
       await startBulkOperation(admin);
       return json({
         products: [],
@@ -84,94 +53,133 @@ export const loader = async ({ request }) => {
         bulkStatus: "CREATED",
         bulkInProgress: true,
       });
+    } else if (["CREATED", "RUNNING"].includes(currentOp.status)) {
+      console.log("Bulk operation in progress – returning loading state…");
+      return json({
+        products: [],
+        locked,
+        plan,
+        status,
+        variantsLimit,
+        totalSyncedVariants: 0,
+        overLimit: false,
+        mustRemove: 0,
+        bulkStatus: currentOp.status,
+        bulkInProgress: true,
+      });
+    } else if (currentOp.status === "COMPLETED") {
+      const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
+      if (new Date(currentOp.completedAt) < fifteenMinutesAgo) {
+        console.log("Bulk result is old (older than 15 minutes). Starting a new bulk operation.");
+        await startBulkOperation(admin);
+        return json({
+          products: [],
+          locked,
+          plan,
+          status,
+          variantsLimit,
+          totalSyncedVariants: 0,
+          overLimit: false,
+          mustRemove: 0,
+          bulkStatus: "CREATED",
+          bulkInProgress: true,
+        });
+      }
+      console.log("Bulk operation COMPLETED. Fetching data…");
+    } else if (["CANCELED", "FAILED"].includes(currentOp.status)) {
+      console.log("Bulk operation cancelled/failed – starting new one…");
+      await startBulkOperation(admin);
+      return json({
+        products: [],
+        locked,
+        plan,
+        status,
+        variantsLimit,
+        totalSyncedVariants: 0,
+        overLimit: false,
+        mustRemove: 0,
+        bulkStatus: currentOp.status,
+        bulkInProgress: true,
+      });
     }
-    console.log("Bulk operation COMPLETED. Fetching data…");
-  } else if (["CANCELED", "FAILED"].includes(currentOp.status)) {
-    console.log("Bulk operation cancelled/failed – starting new one…");
-    await startBulkOperation(admin);
+
+    // Fetch and process bulk operation results
+    if (!currentOp.url) {
+      console.error("Operation COMPLETED but no URL found.");
+      return json({
+        products: [],
+        error: "Bulk operation completed but no file URL was returned.",
+        locked,
+        plan,
+        variantsLimit,
+      });
+    }
+    
+    let allNodes = [];
+    try {
+      console.log("Fetching from URL:", currentOp.url);
+      allNodes = await fetchBulkResults(currentOp.url);
+    } catch (error) {
+      console.error("Error fetching bulk results:", error);
+      return json({
+        products: [],
+        error: "Failed to download bulk results.",
+        locked,
+        plan,
+        variantsLimit,
+      });
+    }
+    
+    // Process data as in the main view
+    const reassembledProducts = rebuildNestedProducts(allNodes);
+    console.log(`Reassembled into ${reassembledProducts.length} top-level products.`);
+    
+    const productsParsed = processProductData(reassembledProducts);
+    
+    // Filter products to only include those with master variants
+    const masterProducts = productsParsed.filter(product => {
+      return product.variants.edges.some(edge => edge.node.isMaster);
+    });
+    
+    // Calculate totals and limits
+    let totalSyncedVariants = 0;
+    productsParsed.forEach((p) => {
+      p.variants.edges.forEach((ve) => {
+        const v = ve.node;
+        const isChild = v.childVariantIds?.length > 0;
+        if (v.isMaster || isChild) {
+          totalSyncedVariants += 1;
+        }
+      });
+    });
+    
+    let overLimit = false;
+    let mustRemove = 0;
+    if (!locked && variantsLimit > 0 && totalSyncedVariants > variantsLimit) {
+      overLimit = true;
+      mustRemove = totalSyncedVariants - variantsLimit;
+    }
+    
     return json({
-      products: [],
+      products: masterProducts, // Only return products with master variants
       locked,
       plan,
       status,
       variantsLimit,
-      totalSyncedVariants: 0,
-      overLimit: false,
-      mustRemove: 0,
-      bulkStatus: currentOp.status,
-      bulkInProgress: true,
+      totalSyncedVariants,
+      overLimit,
+      mustRemove,
+      bulkStatus: "COMPLETED",
+      bulkInProgress: false,
     });
-  }
-
-  // Fetch and process bulk operation results
-  if (!currentOp.url) {
-    console.error("Operation COMPLETED but no URL found.");
-    return json({
-      products: [],
-      error: "Bulk operation completed but no file URL was returned.",
-      locked,
-      plan,
-      variantsLimit,
-    });
-  }
-  
-  let allNodes = [];
-  try {
-    console.log("Fetching from URL:", currentOp.url);
-    allNodes = await fetchBulkResults(currentOp.url);
   } catch (error) {
-    console.error("Error fetching bulk results:", error);
+    console.error("Critical error in master products loader:", error);
     return json({
+      error: "An unexpected error occurred whilst loading your products.",
       products: [],
-      error: "Failed to download bulk results.",
-      locked,
-      plan,
-      variantsLimit,
+      bulkInProgress: false
     });
   }
-  
-  // Process data as in the main view
-  const reassembledProducts = rebuildNestedProducts(allNodes);
-  console.log(`Reassembled into ${reassembledProducts.length} top-level products.`);
-  
-  const productsParsed = processProductData(reassembledProducts);
-  
-  // Filter products to only include those with master variants
-  const masterProducts = productsParsed.filter(product => {
-    return product.variants.edges.some(edge => edge.node.isMaster);
-  });
-  
-  // Calculate totals and limits
-  let totalSyncedVariants = 0;
-  productsParsed.forEach((p) => {
-    p.variants.edges.forEach((ve) => {
-      const v = ve.node;
-      const isChild = v.childVariantIds?.length > 0;
-      if (v.isMaster || isChild) {
-        totalSyncedVariants += 1;
-      }
-    });
-  });
-  
-  let overLimit = false;
-  let mustRemove = 0;
-  if (!locked && variantsLimit > 0 && totalSyncedVariants > variantsLimit) {
-    overLimit = true;
-    mustRemove = totalSyncedVariants - variantsLimit;
-  }
-  
-  return json({
-    products: masterProducts, // Only return products with master variants
-    locked,
-    plan,
-    status,
-    variantsLimit,
-    totalSyncedVariants,
-    overLimit,
-    mustRemove,
-    bulkStatus: "COMPLETED",
-    bulkInProgress: false,
-  });
 };
 
 /**
@@ -179,9 +187,6 @@ export const loader = async ({ request }) => {
  * This displays only products that have at least one variant marked as master
  */
 export default function MasterProductsView() {
-  // Prevents server-side rendering issues
-  if (typeof window === "undefined") return null;
-  
   // Extract data from loader
   const {
     products,
@@ -194,27 +199,35 @@ export default function MasterProductsView() {
     mustRemove,
     bulkInProgress,
     bulkStatus,
+    error,
   } = useLoaderData();
   
   const revalidator = useRevalidator();
-  // State for sync loading modal
   const [syncLoading, setSyncLoading] = useState(false);
-  
-  // State to control component rendering
   const [isTableReady, setIsTableReady] = useState(false);
+  const [isClient, setIsClient] = useState(false);
+
+  // Safely handle client-side rendering
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
 
   // Control the rendering of components to prevent layout jumps
   useEffect(() => {
+    if (!isClient) return;
+    
     // Use a short timeout to ensure all resources are loaded
     const timer = setTimeout(() => {
       setIsTableReady(true);
     }, 300);
     
     return () => clearTimeout(timer);
-  }, []);
+  }, [isClient]);
 
   // Add automatic refresh for CREATED and RUNNING states
   useEffect(() => {
+    if (!isClient) return;
+    
     let timer;
     if (bulkInProgress && ["CREATED", "RUNNING"].includes(bulkStatus)) {
       // Check more frequently (every 5 seconds) when the operation is in progress
@@ -227,7 +240,7 @@ export default function MasterProductsView() {
     return () => {
       if (timer) clearTimeout(timer);
     };
-  }, [bulkInProgress, bulkStatus, revalidator]);
+  }, [bulkInProgress, bulkStatus, revalidator, isClient]);
 
   // Function to initiate product sync
   async function handleSyncProducts() {
@@ -258,16 +271,33 @@ export default function MasterProductsView() {
     }
   }
 
+  // Handle error state
+  if (error) {
+    return (
+      <Frame>
+        <Page>
+          <TitleBar title="Master Products" />
+          <Banner status="critical" title="Error Loading Products">
+            <p>{error}</p>
+            <Button onClick={() => revalidator.revalidate()} primary>Try Again</Button>
+          </Banner>
+        </Page>
+      </Frame>
+    );
+  }
+
   // Content for loading state during bulk operation
   if (bulkInProgress) {
     return (
       <Frame>
         <Page>
-          <BulkLoadingOverlay 
-            active={true}
-            status={bulkStatus}
-            onRefresh={() => revalidator.revalidate()}
-          />
+          {isClient && (
+            <BulkLoadingOverlay 
+              active={true}
+              status={bulkStatus}
+              onRefresh={() => revalidator.revalidate()}
+            />
+          )}
         </Page>
       </Frame>
     );
@@ -276,10 +306,6 @@ export default function MasterProductsView() {
   return (
     <Frame>
       <Page>
-        <Helmet>
-          <script src="https://cdn.botpress.cloud/webchat/v2.3/inject.js"></script>
-          <script src="https://files.bpcontent.cloud/2025/02/24/22/20250224223007-YAA5E131.js"></script>
-        </Helmet>
         <TitleBar title="Master Products" />
         
         {/* Top-right Sync Products button */}
@@ -317,20 +343,49 @@ export default function MasterProductsView() {
           
           <div style={{ visibility: isTableReady ? 'visible' : 'hidden' }}>
             {/* Reusable ProductsTable component with master filter applied */}
-            <ProductsTable 
-              initialProducts={products}
-              locked={locked}
-              showMasterVariantsOnly={true} // This flag indicates we're in the master view
-            />
+            {isClient && (
+              <ProductsTable 
+                initialProducts={products}
+                locked={locked}
+                showMasterVariantsOnly={true} // This flag indicates we're in the master view
+              />
+            )}
           </div>
         </div>
       </Page>
       
       {/* Loading Overlay */}
-      <LoadingOverlay 
-        active={syncLoading} 
-        message="We're downloading all products from your store. The processing time depends on the number of products you have."
-      />
+      {isClient && (
+        <LoadingOverlay 
+          active={syncLoading} 
+          message="We're downloading all products from your store. The processing time depends on the number of products you have."
+        />
+      )}
+    </Frame>
+  );
+}
+
+// Error boundary component to handle navigation errors
+export function ErrorBoundary() {
+  const error = useRouteError();
+  
+  return (
+    <Frame>
+      <Page>
+        <TitleBar title="Master Products" />
+        <Card>
+          <Box padding="4">
+            <Text variant="headingLg" as="h2">Strewth! An error occurred</Text>
+            <Text variant="bodyMd" as="p">
+              We've encountered a bit of a hiccup whilst loading your master products. 
+              Please refresh the page to have another go.
+            </Text>
+            <div style={{ marginTop: "20px" }}>
+              <Button onClick={() => window.location.reload()} primary>Refresh Page</Button>
+            </div>
+          </Box>
+        </Card>
+      </Page>
     </Frame>
   );
 }
