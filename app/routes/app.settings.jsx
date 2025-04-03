@@ -20,64 +20,102 @@ import {
   Banner,
   Modal,
   TextContainer,
+  Badge,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 
 /**
- * Query the subscriptions from Shopify using currentAppInstallation.
- * The query retrieves all subscriptions without filtering, so we filter manually.
- *
- * @param {Object} params - Contains shop and accessToken.
- * @returns {Object|null} - The active subscription (id and status) or null if none found.
+ * Utility function for making API calls to Shopify's GraphQL API.
+ * 
+ * @param {Object} params - Parameters for the API call.
+ * @param {string} params.shop - The shop domain.
+ * @param {string} params.accessToken - The access token for authentication.
+ * @param {string} params.query - The GraphQL query or mutation.
+ * @param {Object} params.variables - Variables for the GraphQL query (optional).
+ * @returns {Object} - The data from the API response.
+ * @throws {Error} - If the API call fails.
  */
-async function queryActiveSubscription({ shop, accessToken }) {
-  const query = `
-    query {
-      currentAppInstallation {
-        subscriptions {
-          id
-          status
-        }
-      }
-    }
-  `;
-  const response = await fetch(
-    `https://${shop}/admin/api/2023-10/graphql.json`,
-    {
+async function shopifyApiCall({ shop, accessToken, query, variables = {} }) {
+  const url = `https://${shop}/admin/api/2023-10/graphql.json`;
+  try {
+    const response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-Shopify-Access-Token": accessToken,
       },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, variables }),
+    });
+
+    const result = await response.json();
+    console.log(`[shopifyApiCall] GraphQL response:`, JSON.stringify(result, null, 2));
+    
+    if (result.errors) {
+      console.error("GraphQL Errors:", result.errors);
+      throw new Error("GraphQL query failed: " + result.errors[0].message);
     }
-  );
-  const result = await response.json();
-  console.log("[queryActiveSubscription] GraphQL response:", JSON.stringify(result, null, 2));
-  const subscriptions = result?.data?.currentAppInstallation?.subscriptions;
-  if (subscriptions && subscriptions.length > 0) {
-    // Filter for the subscription with status ACTIVE
-    const activeSub = subscriptions.find((sub) => sub.status === "ACTIVE");
-    return activeSub || null;
+    return result.data;
+  } catch (error) {
+    console.error("API Call Error:", error.message);
+    throw error;
   }
-  return null;
+}
+
+/**
+ * Query the subscriptions from Shopify using currentAppInstallation.
+ *
+ * @param {Object} params - Contains shop and accessToken.
+ * @returns {Object|null} - The active subscription or null if none found.
+ */
+async function queryActiveSubscription({ shop, accessToken }) {
+  const query = `
+    query {
+      currentAppInstallation {
+        activeSubscriptions {
+          id
+          status
+          createdAt
+          test
+          trialDays
+          name
+          lineItems {
+            plan {
+              pricingDetails {
+                ... on AppRecurringPricing {
+                  price {
+                    amount
+                    currencyCode
+                  }
+                  interval
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const data = await shopifyApiCall({ shop, accessToken, query });
+    const subscriptions = data?.currentAppInstallation?.activeSubscriptions;
+    return subscriptions?.length ? subscriptions[0] : null;
+  } catch (error) {
+    console.error("[queryActiveSubscription] Error:", error.message);
+    throw error;
+  }
 }
 
 /**
  * Cancel a recurring subscription in Shopify using the GraphQL API.
- * Ensures the subscription ID is in the proper global format.
  *
  * @param {Object} params - Contains shop, accessToken, and subscriptionId.
  * @returns {Object} - The canceled subscription data.
  */
 async function cancelRecurringSubscription({ shop, accessToken, subscriptionId }) {
-  const globalSubscriptionId = subscriptionId.startsWith("gid://shopify/AppSubscription/")
-    ? subscriptionId
-    : `gid://shopify/AppSubscription/${subscriptionId}`;
-  console.log("[cancelRecurringSubscription] Cancelling subscription:", globalSubscriptionId);
-  const mutation = `
-    mutation CancelAppSubscription {
-      appSubscriptionCancel(id: "${globalSubscriptionId}") {
+  const query = `
+    mutation CancelAppSubscription($id: ID!) {
+      appSubscriptionCancel(id: $id) {
         appSubscription {
           id
           status
@@ -89,26 +127,26 @@ async function cancelRecurringSubscription({ shop, accessToken, subscriptionId }
       }
     }
   `;
-  const response = await fetch(
-    `https://${shop}/admin/api/2023-10/graphql.json`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": accessToken,
-      },
-      body: JSON.stringify({ query: mutation }),
+
+  const variables = {
+    id: subscriptionId.startsWith("gid://shopify/AppSubscription/")
+      ? subscriptionId
+      : `gid://shopify/AppSubscription/${subscriptionId}`,
+  };
+
+  try {
+    const data = await shopifyApiCall({ shop, accessToken, query, variables });
+    const { appSubscription, userErrors } = data?.appSubscriptionCancel;
+
+    if (userErrors?.length) {
+      throw new Error(userErrors[0].message);
     }
-  );
-  const result = await response.json();
-  console.log("[cancelRecurringSubscription] GraphQL response:", JSON.stringify(result, null, 2));
-  if (!result.data || result.data.appSubscriptionCancel == null) {
-    throw new Error("Unexpected response from Shopify API");
+
+    return appSubscription;
+  } catch (error) {
+    console.error("[cancelRecurringSubscription] Error:", error.message);
+    throw error;
   }
-  if (result.data.appSubscriptionCancel.userErrors && result.data.appSubscriptionCancel.userErrors.length > 0) {
-    throw new Error(result.data.appSubscriptionCancel.userErrors[0].message);
-  }
-  return result.data.appSubscriptionCancel.appSubscription;
 }
 
 /**
@@ -118,18 +156,12 @@ async function cancelRecurringSubscription({ shop, accessToken, subscriptionId }
  * @returns {string} confirmationUrl for the subscription.
  */
 async function createRecurringSubscription({ shop, accessToken, returnUrl }) {
-  console.log(
-    "[createRecurringSubscription] Starting fetch for shop:",
-    shop,
-    "with returnUrl:",
-    returnUrl
-  );
-  const mutation = `
-    mutation CreateSynclogicSubscription {
+  const query = `
+    mutation CreateSynclogicSubscription($returnUrl: URL!, $test: Boolean) {
       appSubscriptionCreate(
-        name: "Synclogic Paid Plan"
-        returnUrl: "${returnUrl}"
-        test: false
+        name: "Stock Control Master Paid Plan"
+        returnUrl: $returnUrl
+        test: $test
         trialDays: 7
         lineItems: [{
           plan: {
@@ -152,23 +184,27 @@ async function createRecurringSubscription({ shop, accessToken, returnUrl }) {
       }
     }
   `;
-  const response = await fetch(
-    `https://${shop}/admin/api/2023-10/graphql.json`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": accessToken,
-      },
-      body: JSON.stringify({ query: mutation }),
+
+  // Determine if we're in a development environment
+  const isDevEnvironment = process.env.NODE_ENV === 'development';
+  const variables = { 
+    returnUrl,
+    test: isDevEnvironment // Use test mode in development
+  };
+
+  try {
+    const data = await shopifyApiCall({ shop, accessToken, query, variables });
+    const { confirmationUrl, userErrors } = data?.appSubscriptionCreate;
+
+    if (userErrors?.length) {
+      throw new Error(userErrors[0].message);
     }
-  );
-  const result = await response.json();
-  console.log("[createRecurringSubscription] GraphQL response:", JSON.stringify(result, null, 2));
-  if (result.data?.appSubscriptionCreate?.userErrors?.length) {
-    throw new Error(result.data.appSubscriptionCreate.userErrors[0].message);
+
+    return confirmationUrl;
+  } catch (error) {
+    console.error("[createRecurringSubscription] Error:", error.message);
+    throw error;
   }
-  return result.data.appSubscriptionCreate.confirmationUrl;
 }
 
 export async function loader({ request }) {
@@ -186,30 +222,73 @@ export async function loader({ request }) {
     }
     session = authResult.session;
   } catch (err) {
+    console.error("[app.settings loader] Authentication error:", err);
     return new Response("Authentication error", { status: 500 });
   }
+  
   const shopDomain = session.shop.toLowerCase().trim();
-  let shopSub = await prisma.shopSubscription.findUnique({
-    where: { shop: shopDomain },
-  });
-  if (!shopSub) {
-    shopSub = await prisma.shopSubscription.create({
-      data: {
-        shop: shopDomain,
-        shopDomain,
-        plan: "FREE",
-        status: "ACTIVE",
-        startDate: new Date(),
-        variantsLimit: 100,
-        syncsQuantity: 0,
-        shopifySubscriptionId: null,
-      },
+  
+  // Get or create shop subscription from database
+  let shopSub;
+  try {
+    shopSub = await prisma.shopSubscription.findUnique({
+      where: { shop: shopDomain },
     });
-    console.log("[app.settings loader] Created new FREE subscription for shop:", shopDomain);
-  } else {
-    console.log("[app.settings loader] Found existing subscription. Current plan:", shopSub.plan);
+    
+    if (!shopSub) {
+      shopSub = await prisma.shopSubscription.create({
+        data: {
+          shop: shopDomain,
+          shopDomain,
+          plan: "FREE",
+          status: "ACTIVE",
+          startDate: new Date(),
+          variantsLimit: 100,
+          syncsQuantity: 0,
+          shopifySubscriptionId: null,
+        },
+      });
+      console.log("[app.settings loader] Created new FREE subscription for shop:", shopDomain);
+    } else {
+      console.log("[app.settings loader] Found existing subscription. Current plan:", shopSub.plan);
+    }
+  } catch (err) {
+    console.error("[app.settings loader] Database error:", err);
+    return json({ error: "Database error" }, { status: 500 });
   }
-  return json({ shopSub });
+  
+  // Query Shopify API for the current subscription status
+  let shopifySubscription = null;
+  try {
+    shopifySubscription = await queryActiveSubscription({
+      shop: shopDomain,
+      accessToken: session.accessToken,
+    });
+    console.log("[app.settings loader] Shopify subscription status:", shopifySubscription?.status);
+    
+    // Optionally update local DB record if we find an active subscription in Shopify
+    // but our local record doesn't match
+    if (shopifySubscription && shopifySubscription.status === "ACTIVE" && shopSub.plan !== "PAID") {
+      await prisma.shopSubscription.update({
+        where: { shop: shopDomain },
+        data: {
+          plan: "PAID",
+          status: "ACTIVE",
+          shopifySubscriptionId: shopifySubscription.id,
+          // Update other fields as needed
+        },
+      });
+      shopSub = await prisma.shopSubscription.findUnique({
+        where: { shop: shopDomain },
+      });
+      console.log("[app.settings loader] Updated local subscription record to PAID plan");
+    }
+  } catch (error) {
+    console.error("[app.settings loader] Error querying Shopify subscription:", error);
+    // Continue execution, as we can still show the page with local DB data
+  }
+  
+  return json({ shopSub, shopifySubscription });
 }
 
 export async function action({ request }) {
@@ -227,8 +306,10 @@ export async function action({ request }) {
     }
     session = authResult.session;
   } catch (err) {
+    console.error("[app.settings action] Authentication error:", err);
     return json({ error: "Authentication error" }, { status: 500 });
   }
+  
   const shopDomain = session.shop.toLowerCase().trim();
   const formData = await request.formData();
   const intent = formData.get("intent");
@@ -236,28 +317,36 @@ export async function action({ request }) {
 
   // Save custom API URL settings.
   if (intent === "save-settings") {
-    const customApiUrl = formData.get("customApiUrl")?.toString() || "";
-    await prisma.shopSubscription.update({
-      where: { shop: shopDomain },
-      data: { customApiUrl },
-    });
-    return json({ success: true, message: "Settings saved" });
+    try {
+      const customApiUrl = formData.get("customApiUrl")?.toString() || "";
+      await prisma.shopSubscription.update({
+        where: { shop: shopDomain },
+        data: { customApiUrl },
+      });
+      return json({ success: true, message: "Settings saved successfully" });
+    } catch (err) {
+      console.error("[app.settings action] Error saving settings:", err);
+      return json({ error: "Failed to save settings" }, { status: 500 });
+    }
   }
 
   // Start a paid subscription plan.
   if (intent === "start-paid-plan") {
-    const url = new URL(request.url);
-    const host = url.searchParams.get("host") || "";
-    const appUrl = process.env.SHOPIFY_APP_URL || "https://your-ngrok-domain.ngrok-free.app";
-    const returnUrl = `${appUrl}/app/settings-callback?shop=${shopDomain}&host=${host}`;
     try {
+      const url = new URL(request.url);
+      const host = url.searchParams.get("host") || "";
+      const appUrl = process.env.SHOPIFY_APP_URL || "https://your-ngrok-domain.ngrok-free.app";
+      const returnUrl = `${appUrl}/app/settings-callback?shop=${shopDomain}&host=${host}`;
+      
       const confirmationUrl = await createRecurringSubscription({
         shop: shopDomain,
         accessToken: session.accessToken,
         returnUrl,
       });
+      
       return json({ confirmationUrl });
     } catch (err) {
+      console.error("[app.settings action] Error creating subscription:", err);
       return json({ error: err.message }, { status: 500 });
     }
   }
@@ -266,20 +355,24 @@ export async function action({ request }) {
   if (intent === "cancel-subscription") {
     try {
       // Query Shopify for the current subscriptions.
-      const subscriptions = await queryActiveSubscription({
+      const subscription = await queryActiveSubscription({
         shop: shopDomain,
         accessToken: session.accessToken,
       });
-      if (!subscriptions || !subscriptions.id) {
+      
+      if (!subscription || !subscription.id) {
         throw new Error("No active subscription found in Shopify");
       }
+      
       // Cancel the subscription via Shopify API.
       const canceledSubscription = await cancelRecurringSubscription({
         shop: shopDomain,
         accessToken: session.accessToken,
-        subscriptionId: subscriptions.id,
+        subscriptionId: subscription.id,
       });
+      
       console.log("[app.settings action] Shopify subscription cancelled:", canceledSubscription);
+      
       // Update the local DB record to mark the subscription as cancelled.
       const updatedSubscription = await prisma.shopSubscription.update({
         where: { shop: shopDomain },
@@ -290,9 +383,43 @@ export async function action({ request }) {
           shopifySubscriptionId: null,
         },
       });
+      
       console.log("[app.settings action] Cancel subscription updated record:", updatedSubscription);
-      return json({ success: true, message: "Subscription cancelled." });
+      return json({ success: true, message: "Subscription successfully cancelled" });
     } catch (err) {
+      console.error("[app.settings action] Error cancelling subscription:", err);
+      return json({ error: err.message }, { status: 500 });
+    }
+  }
+
+  // Refresh subscription status
+  if (intent === "refresh-subscription") {
+    try {
+      const shopifySubscription = await queryActiveSubscription({
+        shop: shopDomain,
+        accessToken: session.accessToken,
+      });
+      
+      // Optionally update local DB record if we find an active subscription in Shopify
+      if (shopifySubscription && shopifySubscription.status === "ACTIVE") {
+        await prisma.shopSubscription.update({
+          where: { shop: shopDomain },
+          data: {
+            plan: "PAID",
+            status: "ACTIVE", 
+            shopifySubscriptionId: shopifySubscription.id,
+          },
+        });
+        console.log("[app.settings action] Updated local subscription record based on refresh");
+      }
+      
+      return json({ 
+        success: true, 
+        message: "Subscription status refreshed", 
+        shopifySubscription 
+      });
+    } catch (err) {
+      console.error("[app.settings action] Error refreshing subscription:", err);
       return json({ error: err.message }, { status: 500 });
     }
   }
@@ -301,7 +428,7 @@ export async function action({ request }) {
 }
 
 export default function AppSettings() {
-  const { shopSub } = useLoaderData();
+  const { shopSub, shopifySubscription } = useLoaderData();
   const actionData = useActionData();
   const location = useLocation();
   const urlParams = new URLSearchParams(location.search);
@@ -309,13 +436,49 @@ export default function AppSettings() {
   const [customUrl, setCustomUrl] = useState(shopSub.customApiUrl || "");
   const isPaidPlan = shopSub.plan === "PAID";
   const [showCancelModal, setShowCancelModal] = useState(false);
+  const [currentShopifySubscription, setCurrentShopifySubscription] = useState(shopifySubscription);
   const fetcher = useFetcher();
 
   useEffect(() => {
     if (actionData?.confirmationUrl) {
       window.top.location.href = actionData.confirmationUrl;
     }
+    
+    // Update subscription state if we get new data from the action
+    if (actionData?.shopifySubscription) {
+      setCurrentShopifySubscription(actionData.shopifySubscription);
+    }
   }, [actionData]);
+
+  // Helper function to get subscription status badge
+  const getStatusBadge = (status) => {
+    switch(status) {
+      case "ACTIVE":
+        return <Badge status="success">Active</Badge>;
+      case "CANCELLED":
+        return <Badge status="critical">Cancelled</Badge>;
+      case "EXPIRED":
+        return <Badge status="warning">Expired</Badge>;
+      case "FROZEN":
+        return <Badge status="info">Frozen</Badge>;
+      case "PENDING":
+        return <Badge status="attention">Pending</Badge>;
+      default:
+        return <Badge>Unknown</Badge>;
+    }
+  };
+
+  // Format creation date
+  const formatDate = (dateString) => {
+    if (!dateString) return "N/A";
+    const date = new Date(dateString);
+    return date.toLocaleDateString();
+  };
+
+  // Handle refresh button click
+  const handleRefresh = () => {
+    fetcher.submit({ intent: "refresh-subscription" }, { method: "post" });
+  };
 
   return (
     <Page title="Projekt: Stock Control Master Settings">
@@ -323,10 +486,61 @@ export default function AppSettings() {
       {actionData?.error && <Banner status="critical" title="Error">{actionData.error}</Banner>}
       {actionData?.success && <Banner status="success" title="Success">{actionData.message}</Banner>}
       <Layout>
+        {/* Card para mostrar el estado de la suscripción de Shopify */}
+        <Layout.Section>
+          <Card title="Shopify Subscription Status" sectioned>
+            {currentShopifySubscription ? (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                  <div>
+                    <p style={{ fontSize: '16px', fontWeight: '600' }}>{currentShopifySubscription.name || "N/A"}</p>
+                    {getStatusBadge(currentShopifySubscription.status)}
+                  </div>
+                  {/*<Button onClick={handleRefresh}>Refresh</Button>*/}
+                </div>
+                
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginTop: '16px' }}>
+                  <div>
+                    <p><strong>Created:</strong> {formatDate(currentShopifySubscription.createdAt)}</p>
+                    <p><strong>Trial Days:</strong> {currentShopifySubscription.trialDays || 0}</p>
+                  </div>
+                  <div>
+                    {/*<p><strong>Test Mode:</strong> {currentShopifySubscription.test ? "Yes" : "No"}</p>*/}
+                    {currentShopifySubscription.lineItems && currentShopifySubscription.lineItems[0]?.plan?.pricingDetails && (
+                      <p>
+                        <strong>Price:</strong> {
+                          currentShopifySubscription.lineItems[0].plan.pricingDetails.price?.amount || "N/A"
+                        } {
+                          currentShopifySubscription.lineItems[0].plan.pricingDetails.price?.currencyCode || ""
+                        }
+                      </p>
+                    )}
+                  </div>
+                </div>
+                
+                {currentShopifySubscription.lineItems && currentShopifySubscription.lineItems[0]?.plan?.pricingDetails && (
+                  <p style={{ marginTop: '12px' }}>
+                    <strong>Billing Interval:</strong> {
+                      currentShopifySubscription.lineItems[0].plan.pricingDetails.interval?.replace(/_/g, ' ').toLowerCase() || "N/A"
+                    }
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <p>No active Shopify subscription found.</p>
+                {/*<Button onClick={handleRefresh}>Refresh Status</Button>*/}
+              </div>
+            )}
+          </Card>
+        </Layout.Section>
+        
         <Layout.Section oneHalf>
           <Card sectioned title="Free Plan">
             <p>
-              Limited to 100 variants, includes a 7-day trial. {shopSub.plan === "FREE" && <strong>(current)</strong>}
+              Limited to 100 variants, includes a 7-day trial. {shopSub.plan === "FREE" && 
+                <Badge status="success">Current Plan</Badge>
+              }
             </p>
             <p style={{ fontWeight: 500 }}>Price: $0/month</p>
           </Card>
@@ -334,7 +548,9 @@ export default function AppSettings() {
         <Layout.Section oneHalf>
           <Card sectioned title="Paid Plan">
             <p>
-              Unlimited variants, includes a 7-day trial. {isPaidPlan && <strong>(current)</strong>}
+              Unlimited variants, includes a 7-day trial. {isPaidPlan && 
+                <Badge status="success">Current Plan</Badge>
+              }
             </p>
             <p style={{ fontWeight: 500 }}>Price: $49.99/month</p>
             {!isPaidPlan ? (
