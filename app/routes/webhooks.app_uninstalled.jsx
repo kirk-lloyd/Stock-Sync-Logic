@@ -82,6 +82,42 @@ async function cancelShopifySubscription(shop, accessToken, subscriptionId) {
 }
 
 /**
+ * Process the app uninstallation directly
+ * @param {string} shop - Shop domain
+ * @param {object} session - Session with accessToken
+ */
+async function updateShopSubscription(shop) {
+  try {
+    console.log(`[updateShopSubscription] Direct update for ${shop}`);
+    
+    // Find the shop's subscription in our database
+    const shopSub = await prisma.shopSubscription.findUnique({
+      where: { shop },
+    });
+
+    if (shopSub) {
+      console.log(`[updateShopSubscription] Found subscription for ${shop}. Current status: ${shopSub.status}, plan: ${shopSub.plan}`);
+
+      // Update our database record to mark the subscription as cancelled
+      const updatedShopSub = await prisma.shopSubscription.update({
+        where: { shop },
+        data: {
+          status: "CANCELLED",
+          plan: "FREE",
+          shopifySubscriptionId: null,
+        },
+      });
+      
+      console.log(`[updateShopSubscription] Updated database record: ${JSON.stringify(updatedShopSub)}`);
+    } else {
+      console.log(`[updateShopSubscription] No subscription found for ${shop}`);
+    }
+  } catch (error) {
+    console.error(`[updateShopSubscription] Error updating DB: ${error.message}`, error);
+  }
+}
+
+/**
  * Check if webhook has already been processed
  * @param {string} eventId - The event ID from Shopify
  * @returns {Promise<boolean>} - Whether the event has been processed
@@ -134,6 +170,9 @@ async function processAppUninstallation(shop, session, eventId) {
   const startTime = Date.now();
   
   try {
+    // First, update the shop subscription directly to ensure it happens
+    await updateShopSubscription(shop);
+    
     // Check if this event is already processed
     if (await isEventProcessed(eventId)) {
       console.log(`[processAppUninstallation] Event ${eventId} already processed`);
@@ -149,8 +188,6 @@ async function processAppUninstallation(shop, session, eventId) {
     });
 
     if (shopSub) {
-      console.log(`[processAppUninstallation] Found subscription for ${shop}, status: ${shopSub.status}, plan: ${shopSub.plan}`);
-      
       // If there's an active Shopify subscription ID, try to cancel it
       if (shopSub.shopifySubscriptionId && session?.accessToken) {
         console.log(`[processAppUninstallation] Cancelling Shopify subscription ${shopSub.shopifySubscriptionId}`);
@@ -189,25 +226,7 @@ async function processAppUninstallation(shop, session, eventId) {
             }
           }
         }
-        
-        if (!success) {
-          console.warn(`[processAppUninstallation] Could not cancel subscription after ${retries} attempts.`);
-        }
       }
-
-      // Update our database record to mark the subscription as cancelled
-      await prisma.shopSubscription.update({
-        where: { shop },
-        data: {
-          status: "CANCELLED",
-          plan: "FREE",
-          shopifySubscriptionId: null,
-        },
-      });
-      
-      console.log(`[processAppUninstallation] Updated subscription status to CANCELLED for ${shop}`);
-    } else {
-      console.log(`[processAppUninstallation] No subscription found for ${shop}`);
     }
 
     // Delete sessions for this shop
@@ -223,7 +242,6 @@ async function processAppUninstallation(shop, session, eventId) {
   } catch (error) {
     console.error(`[processAppUninstallation] Unhandled error: ${error.message}`, {
       shop,
-      eventId,
       errorType: error.name,
       stack: error.stack
     });
@@ -244,7 +262,10 @@ export async function action({ request }) {
     const eventId = request.headers.get("X-Shopify-Event-Id");
     console.log(`[APP_UNINSTALLED] Authenticated webhook: shop=${shop}, topic=${topic}, eventId=${eventId}`);
     
-    // Process asynchronously after returning 200 OK
+    // Update shop subscription immediately
+    await updateShopSubscription(shop);
+    
+    // Process remaining tasks asynchronously after returning 200 OK
     setTimeout(() => {
       processAppUninstallation(shop, session, eventId)
         .catch(error => {

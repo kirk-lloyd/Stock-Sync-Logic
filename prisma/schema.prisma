@@ -68,5 +68,15 @@ model ShopSubscription {
   updatedAt             DateTime @updatedAt
 }
 
+model ProcessedWebhook {
+  id          String   @id @default(uuid())
+  eventId     String   @unique
+  topic       String
+  shop        String
+  processedAt DateTime
+  createdAt   DateTime @default(now())
 
+  @@index([shop, topic])
+  @@index([eventId])
+}
 

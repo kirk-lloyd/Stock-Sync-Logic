@@ -21,6 +21,7 @@ import {
   Modal,
   TextContainer,
   Badge,
+  Spinner,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 
@@ -189,7 +190,7 @@ async function createRecurringSubscription({ shop, accessToken, returnUrl }) {
   const isDevEnvironment = process.env.NODE_ENV === 'development';
   const variables = { 
     returnUrl,
-    test: isDevEnvironment // Use test mode in development
+    test: true // Use test mode in development
   };
 
   try {
@@ -227,6 +228,10 @@ export async function loader({ request }) {
   }
   
   const shopDomain = session.shop.toLowerCase().trim();
+  
+  // Get URL parameters including potential error messages from callback
+  const url = new URL(request.url);
+  const errorMessage = url.searchParams.get("error");
   
   // Get or create shop subscription from database
   let shopSub;
@@ -288,7 +293,7 @@ export async function loader({ request }) {
     // Continue execution, as we can still show the page with local DB data
   }
   
-  return json({ shopSub, shopifySubscription });
+  return json({ shopSub, shopifySubscription, errorMessage });
 }
 
 export async function action({ request }) {
@@ -338,12 +343,15 @@ export async function action({ request }) {
       const appUrl = process.env.SHOPIFY_APP_URL || "https://your-ngrok-domain.ngrok-free.app";
       const returnUrl = `${appUrl}/app/settings-callback?shop=${shopDomain}&host=${host}`;
       
+      console.log("[app.settings action] Creating subscription with returnUrl:", returnUrl);
+      
       const confirmationUrl = await createRecurringSubscription({
         shop: shopDomain,
         accessToken: session.accessToken,
         returnUrl,
       });
       
+      console.log("[app.settings action] Received confirmationUrl:", confirmationUrl);
       return json({ confirmationUrl });
     } catch (err) {
       console.error("[app.settings action] Error creating subscription:", err);
@@ -385,7 +393,18 @@ export async function action({ request }) {
       });
       
       console.log("[app.settings action] Cancel subscription updated record:", updatedSubscription);
-      return json({ success: true, message: "Subscription successfully cancelled" });
+      
+      // Query the updated subscription status from Shopify (should be null/empty after cancellation)
+      const updatedShopifySubscription = await queryActiveSubscription({
+        shop: shopDomain,
+        accessToken: session.accessToken,
+      });
+      
+      return json({ 
+        success: true, 
+        message: "Subscription successfully cancelled",
+        shopifySubscription: null // Explicitly set to null for the UI to update correctly
+      });
     } catch (err) {
       console.error("[app.settings action] Error cancelling subscription:", err);
       return json({ error: err.message }, { status: 500 });
@@ -400,6 +419,8 @@ export async function action({ request }) {
         accessToken: session.accessToken,
       });
       
+      console.log("[app.settings action] Refreshed subscription status:", shopifySubscription);
+      
       // Optionally update local DB record if we find an active subscription in Shopify
       if (shopifySubscription && shopifySubscription.status === "ACTIVE") {
         await prisma.shopSubscription.update({
@@ -408,6 +429,7 @@ export async function action({ request }) {
             plan: "PAID",
             status: "ACTIVE", 
             shopifySubscriptionId: shopifySubscription.id,
+            subscriptionData: JSON.stringify(shopifySubscription)
           },
         });
         console.log("[app.settings action] Updated local subscription record based on refresh");
@@ -428,7 +450,7 @@ export async function action({ request }) {
 }
 
 export default function AppSettings() {
-  const { shopSub, shopifySubscription } = useLoaderData();
+  const { shopSub, shopifySubscription, errorMessage } = useLoaderData();
   const actionData = useActionData();
   const location = useLocation();
   const urlParams = new URLSearchParams(location.search);
@@ -437,6 +459,7 @@ export default function AppSettings() {
   const isPaidPlan = shopSub.plan === "PAID";
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [currentShopifySubscription, setCurrentShopifySubscription] = useState(shopifySubscription);
+  const [isLoading, setIsLoading] = useState(false);
   const fetcher = useFetcher();
 
   useEffect(() => {
@@ -444,11 +467,52 @@ export default function AppSettings() {
       window.top.location.href = actionData.confirmationUrl;
     }
     
-    // Update subscription state if we get new data from the action
-    if (actionData?.shopifySubscription) {
-      setCurrentShopifySubscription(actionData.shopifySubscription);
+    // When we get new data from an action, set loading state
+    if (actionData?.shopifySubscription !== undefined || actionData?.success) {
+      setIsLoading(true);
+      
+      // Simulate a delay to show the loading state
+      const timer = setTimeout(() => {
+        if (actionData?.shopifySubscription !== undefined) {
+          setCurrentShopifySubscription(actionData.shopifySubscription);
+        }
+        
+        // If subscription was cancelled, also update isPaidPlan state
+        if (actionData?.success && actionData.message === "Subscription successfully cancelled") {
+          // Would need to refetch the shopSub data properly, but for UI we can just update this state
+          isPaidPlan = false;
+        }
+        
+        setIsLoading(false);
+      }, 3000); // 3 second delay
+      
+      return () => clearTimeout(timer);
     }
   }, [actionData]);
+
+  // Monitor fetcher state to show loading while data is being fetched
+  useEffect(() => {
+    if (fetcher.state === "submitting") {
+      setIsLoading(true);
+    } else if (fetcher.data && fetcher.state === "idle") {
+      // After fetcher completes and data is received, wait 3 seconds before updating the UI
+      const timer = setTimeout(() => {
+        // Handle both cases: when subscription data exists and when it's explicitly null
+        if (fetcher.data.shopifySubscription !== undefined) {
+          setCurrentShopifySubscription(fetcher.data.shopifySubscription);
+        }
+        
+        // If a cancellation was successful, update the UI accordingly
+        if (fetcher.data.success && fetcher.data.message === "Subscription successfully cancelled") {
+          setCurrentShopifySubscription(null);
+        }
+        
+        setIsLoading(false);
+      }, 3000);
+      
+      return () => clearTimeout(timer);
+    }
+  }, [fetcher.state, fetcher.data]);
 
   // Helper function to get subscription status badge
   const getStatusBadge = (status) => {
@@ -477,26 +541,49 @@ export default function AppSettings() {
 
   // Handle refresh button click
   const handleRefresh = () => {
+    setIsLoading(true);
     fetcher.submit({ intent: "refresh-subscription" }, { method: "post" });
   };
+
+  // Render the loading state for the subscription status card
+  const renderLoadingState = () => (
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '32px', flexDirection: 'column' }}>
+      <Spinner accessibilityLabel="Loading subscription status" size="large" color="teal" />
+      <p style={{ marginTop: '16px', color: '#637381' }}>Updating subscription status...</p>
+    </div>
+  );
 
   return (
     <Page title="Projekt: Stock Control Master Settings">
       <TitleBar title="Settings" />
+      
+      {/* Display error message from callback if present */}
+      {errorMessage && (
+        <Banner status="critical" title="Subscription Error">
+          {errorMessage}
+          <div style={{ marginTop: '8px' }}>
+            <Button onClick={handleRefresh}>Retry Subscription Verification</Button>
+          </div>
+        </Banner>
+      )}
+      
       {actionData?.error && <Banner status="critical" title="Error">{actionData.error}</Banner>}
       {actionData?.success && <Banner status="success" title="Success">{actionData.message}</Banner>}
+      
       <Layout>
         {/* Card para mostrar el estado de la suscripción de Shopify */}
         <Layout.Section>
           <Card title="Shopify Subscription Status" sectioned>
-            {currentShopifySubscription ? (
+            {isLoading ? (
+              renderLoadingState()
+            ) : currentShopifySubscription ? (
               <div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                   <div>
                     <p style={{ fontSize: '16px', fontWeight: '600' }}>{currentShopifySubscription.name || "N/A"}</p>
                     {getStatusBadge(currentShopifySubscription.status)}
                   </div>
-                  {/*<Button onClick={handleRefresh}>Refresh</Button>*/}
+                  <Button onClick={handleRefresh}>Refresh Status</Button>
                 </div>
                 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginTop: '16px' }}>
@@ -505,7 +592,6 @@ export default function AppSettings() {
                     <p><strong>Trial Days:</strong> {currentShopifySubscription.trialDays || 0}</p>
                   </div>
                   <div>
-                    {/*<p><strong>Test Mode:</strong> {currentShopifySubscription.test ? "Yes" : "No"}</p>*/}
                     {currentShopifySubscription.lineItems && currentShopifySubscription.lineItems[0]?.plan?.pricingDetails && (
                       <p>
                         <strong>Price:</strong> {
@@ -529,7 +615,7 @@ export default function AppSettings() {
             ) : (
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <p>No active Shopify subscription found.</p>
-                {/*<Button onClick={handleRefresh}>Refresh Status</Button>*/}
+                <Button onClick={handleRefresh}>Refresh Status</Button>
               </div>
             )}
           </Card>
@@ -556,11 +642,11 @@ export default function AppSettings() {
             {!isPaidPlan ? (
               <Form method="post" action={`?host=${host}`}>
                 <input type="hidden" name="intent" value="start-paid-plan" />
-                <Button submit primary>Start Paid Plan</Button>
+                <Button submit primary disabled={isLoading}>Start Paid Plan</Button>
               </Form>
             ) : (
               <>
-                <Button destructive onClick={() => setShowCancelModal(true)}>
+                <Button destructive onClick={() => setShowCancelModal(true)} disabled={isLoading}>
                   Cancel Subscription
                 </Button>
                 <Modal
@@ -570,6 +656,7 @@ export default function AppSettings() {
                     content: "Confirm Cancellation",
                     destructive: true,
                     onAction: () => {
+                      setIsLoading(true);
                       fetcher.submit({ intent: "cancel-subscription", host }, { method: "post" });
                       setShowCancelModal(false);
                     },
@@ -604,7 +691,7 @@ export default function AppSettings() {
                 helpText="Projekt: Stock Control Master will send product updates here in JSON format."
               />
               <br />
-              <Button submit>Save</Button>
+              <Button submit disabled={isLoading}>Save</Button>
             </Form>
           </Card>
         </Layout.Section>

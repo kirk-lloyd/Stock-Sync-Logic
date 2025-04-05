@@ -6,128 +6,237 @@ import prisma from "../db.server";
 import React from "react";
 
 /**
- * Validate that a shop string is a non-empty value.
- * Note: If you support custom domains, do not restrict to ".myshopify.com".
+ * Utility function for making API calls to Shopify's GraphQL API.
  */
-function isValidShop(shop) {
-  return typeof shop === "string" && shop.trim() !== "";
+async function shopifyApiCall({ shop, accessToken, query, variables = {} }) {
+  const url = `https://${shop}/admin/api/2023-10/graphql.json`;
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": accessToken,
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+
+    const result = await response.json();
+    console.log(`[shopifyApiCall] GraphQL response:`, JSON.stringify(result, null, 2));
+    
+    if (result.errors) {
+      console.error("GraphQL Errors:", result.errors);
+      throw new Error("GraphQL query failed: " + result.errors[0].message);
+    }
+    return result.data;
+  } catch (error) {
+    console.error("API Call Error:", error.message);
+    throw error;
+  }
 }
 
 /**
- * Validate that a chargeId is a non-empty string.
+ * Query the subscriptions from Shopify using currentAppInstallation.
  */
-function isValidChargeId(chargeId) {
-  return typeof chargeId === "string" && chargeId.trim() !== "";
+async function queryActiveSubscription({ shop, accessToken }) {
+  const query = `
+    query {
+      currentAppInstallation {
+        activeSubscriptions {
+          id
+          status
+          createdAt
+          test
+          trialDays
+          name
+          lineItems {
+            plan {
+              pricingDetails {
+                ... on AppRecurringPricing {
+                  price {
+                    amount
+                    currencyCode
+                  }
+                  interval
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const data = await shopifyApiCall({ shop, accessToken, query });
+    const subscriptions = data?.currentAppInstallation?.activeSubscriptions;
+    return subscriptions?.length ? subscriptions[0] : null;
+  } catch (error) {
+    console.error("[queryActiveSubscription] Error:", error.message);
+    throw error;
+  }
 }
 
 /**
  * Retrieve the shop session headers from the database using Prisma.
- * This fallback mimics webhook authentication in case the embedded auth fails.
  */
-async function getShopSessionHeaders(shopDomain) {
-  const session = await prisma.session.findFirst({
-    where: { shop: shopDomain },
-  });
-  if (!session || !session.accessToken) {
-    throw new Error(`No session or accessToken found for shop: ${shopDomain}`);
+async function getShopSessionFromDB(shopDomain) {
+  try {
+    const session = await prisma.session.findFirst({
+      where: { shop: shopDomain },
+    });
+    
+    if (!session || !session.accessToken) {
+      throw new Error(`No session or accessToken found for shop: ${shopDomain}`);
+    }
+    
+    console.log("[Callback] Retrieved session token from DB:", session.accessToken);
+    return session;
+  } catch (error) {
+    console.error("[getShopSessionFromDB] Error:", error.message);
+    throw error;
   }
-  console.log("[Callback] Retrieved session token from DB:", session.accessToken);
-  return {
-    adminHeaders: {
-      "X-Shopify-Access-Token": session.accessToken,
-    },
-    adminApiUrl: `https://${shopDomain}/admin/api/2024-10/graphql.json`,
-  };
+}
+
+/**
+ * Verify that a subscription is active with the given charge ID
+ */
+async function verifySubscriptionActive({ shop, accessToken, chargeId }) {
+  let retryCount = 0;
+  const maxRetries = 3;
+  const retryDelay = 2000; // 2 seconds
+  
+  while (retryCount < maxRetries) {
+    try {
+      const subscription = await queryActiveSubscription({ shop, accessToken });
+      
+      if (subscription && subscription.status === "ACTIVE") {
+        console.log("[verifySubscriptionActive] Subscription is active:", subscription.id);
+        return subscription;
+      }
+      
+      console.log(`[verifySubscriptionActive] Attempt ${retryCount + 1}: Subscription not active yet, retrying...`);
+      retryCount++;
+      
+      if (retryCount < maxRetries) {
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+      }
+    } catch (error) {
+      console.error(`[verifySubscriptionActive] Attempt ${retryCount + 1} error:`, error.message);
+      retryCount++;
+      
+      if (retryCount < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+      } else {
+        throw error;
+      }
+    }
+  }
+  
+  console.warn("[verifySubscriptionActive] Failed to confirm active subscription after retries");
+  return null;
 }
 
 export async function loader({ request }) {
   console.log("[app.settings-callback loader] Start");
   console.log("[app.settings-callback loader] Request URL:", request.url);
 
-  // Parse query parameters from the URL.
+  // Parse query parameters from the URL
   const url = new URL(request.url);
-  let shop = url.searchParams.get("shop");
+  const shop = url.searchParams.get("shop")?.toLowerCase().trim();
   const host = url.searchParams.get("host") || "";
   const chargeId = url.searchParams.get("charge_id") || "";
+  
   console.log("[app.settings-callback loader] Received query params:", { shop, host, chargeId });
 
-  // Validate required parameters.
-  if (!shop || !isValidShop(shop)) {
+  // Validate required parameters
+  if (!shop) {
     console.error("[app.settings-callback loader] Invalid or missing shop parameter");
     return new Response("Invalid or missing shop parameter", { status: 400 });
   }
-  if (!chargeId || !isValidChargeId(chargeId)) {
+  
+  if (!chargeId) {
     console.error("[app.settings-callback loader] Invalid or missing charge_id parameter");
     return new Response("Invalid or missing charge_id parameter", { status: 400 });
   }
 
-  // Normalize shop value for consistency.
-  shop = shop.toLowerCase().trim();
-  console.log("[app.settings-callback loader] Normalized shop:", shop);
-
-  let sessionShop = null;
+  let session = null;
+  
+  // Try multiple authentication approaches
   try {
-    // Attempt to authenticate the request using the embedded auth strategy.
-    const authResult = await authenticate.admin(request);
-    // If we have a valid session, use the shop from the session.
-    if (authResult.session && authResult.session.shop) {
-      console.log("[app.settings-callback loader] Authenticated session:", authResult.session);
-      sessionShop = authResult.session.shop.toLowerCase().trim();
-    } else {
-      console.warn("[app.settings-callback loader] No valid session found; falling back to DB lookup.");
-      await getShopSessionHeaders(shop);
-      sessionShop = shop;
-    }
-  } catch (err) {
-    // If the error is a redirect (302), use fallback authentication.
-    if (err instanceof Response && err.status === 302) {
-      console.warn("[app.settings-callback loader] authenticate.admin threw a redirect response. Using fallback authentication.");
-      try {
-        await getShopSessionHeaders(shop);
-        sessionShop = shop;
-      } catch (fallbackError) {
-        console.error("[app.settings-callback loader] Fallback authentication error:", fallbackError);
-        return new Response("Error during authentication fallback", { status: 500 });
+    // First, try the standard authentication
+    try {
+      const authResult = await authenticate.admin(request);
+      
+      if (authResult.session && authResult.session.shop) {
+        session = authResult.session;
+        console.log("[app.settings-callback loader] Successfully authenticated with session");
       }
-    } else {
-      console.error("[app.settings-callback loader] Error during authentication:", err);
-      return new Response("Error during authentication", { status: 500 });
+    } catch (authError) {
+      console.warn("[app.settings-callback loader] Standard authentication failed:", authError.message);
     }
-  }
+    
+    // If standard auth failed, try to get session from DB
+    if (!session) {
+      try {
+        session = await getShopSessionFromDB(shop);
+        console.log("[app.settings-callback loader] Successfully retrieved session from DB");
+      } catch (dbError) {
+        console.error("[app.settings-callback loader] Failed to get session from DB:", dbError.message);
+        throw new Error("Failed to authenticate: Could not retrieve valid session");
+      }
+    }
 
-  // Ensure that the shop from the session matches the shop from the query parameters.
-  if (sessionShop !== shop) {
-    console.error("[app.settings-callback loader] Shop mismatch:", { sessionShop, queryShop: shop });
-    return new Response("Shop mismatch", { status: 400 });
-  }
+    // Ensure the authenticated shop matches the callback shop
+    if (session.shop.toLowerCase() !== shop) {
+      console.error("[app.settings-callback loader] Shop mismatch:", { sessionShop: session.shop, queryShop: shop });
+      throw new Error("Shop mismatch between authenticated session and callback parameters");
+    }
 
-  console.log("[app.settings-callback loader] Finalizing subscription for shop:", sessionShop);
-
-  try {
-    // Update the subscription record in the database, marking the plan as "PAID"
-    // and storing the Shopify subscription ID (chargeId) for future cancellations.
-    const updatedSubscription = await prisma.shopSubscription.update({
-      where: { shop: sessionShop },
-      data: {
-        plan: "PAID",
-        status: "ACTIVE",
-        variantsLimit: 999999,
-        shopifySubscriptionId: chargeId, // Save the Shopify subscription id.
-      },
+    console.log("[app.settings-callback loader] Verifying subscription status...");
+    
+    // Verify subscription with Shopify (with retries)
+    const subscription = await verifySubscriptionActive({
+      shop,
+      accessToken: session.accessToken,
+      chargeId
     });
-    console.log("[app.settings-callback loader] Updated subscription record:", updatedSubscription);
+    
+    // Update the local subscription record
+    try {
+      const updatedSubscription = await prisma.shopSubscription.update({
+        where: { shop },
+        data: {
+          plan: "PAID",
+          status: "ACTIVE",
+          variantsLimit: 999999,
+          shopifySubscriptionId: chargeId,
+          // Store subscription details for further reference
+          subscriptionData: JSON.stringify(subscription)
+        },
+      });
+      
+      console.log("[app.settings-callback loader] Updated subscription record:", updatedSubscription);
+    } catch (updateError) {
+      console.error("[app.settings-callback loader] Error updating subscription record:", updateError);
+      // Continue even if DB update fails - we can handle this on the settings page
+    }
 
-    // Set security headers and redirect to the settings page.
-    const headers = {
-      "Content-Security-Policy": "default-src 'self';",
-      "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
-    };
-
-    console.log("[app.settings-callback loader] Redirecting to /app/settings");
-    return redirect("/app/settings", { headers });
-  } catch (updateError) {
-    console.error("[app.settings-callback loader] Error updating subscription:", updateError);
-    return new Response("Error updating subscription", { status: 500 });
+    // Set security headers and redirect to the settings page
+    const redirectUrl = `/app/settings?shop=${shop}&host=${host}`;
+    console.log("[app.settings-callback loader] Redirecting to:", redirectUrl);
+    
+    return redirect(redirectUrl, {
+      headers: {
+        "Content-Security-Policy": "default-src 'self';",
+        "Strict-Transport-Security": "max-age=31536000; includeSubDomains"
+      }
+    });
+  } catch (error) {
+    console.error("[app.settings-callback loader] Critical error:", error);
+    
+    // Instead of failing with 500, redirect to settings with error parameter
+    return redirect(`/app/settings?shop=${shop}&host=${host}&error=${encodeURIComponent("Error processing subscription: " + error.message)}`);
   }
 }
 
