@@ -54,18 +54,20 @@ model WebhookEvent {
  * One record per store.
  */
 model ShopSubscription {
-  id                    String   @id @default(uuid())
-  shop                  String   @unique
-  shopDomain            String?  // Full domain (myshopify.com)
-  plan                  String?  // e.g. "FREE" or "PAID"
-  status                String?  // e.g. "ACTIVE", "CANCELLED", etc.
+  id                    String    @id @default(uuid())
+  shop                  String    @unique
+  shopDomain            String?   // Full domain (myshopify.com)
+  plan                  String?   // e.g. "FREE" or "PAID"
+  status                String?   // e.g. "ACTIVE", "CANCELLED", "PENDING_CANCELLATION", etc.
   startDate             DateTime?
-  variantsLimit         Int?     @default(0)
-  syncsQuantity         Int?     @default(0)
-  customApiUrl          String?  // Custom URL for webhooks
-  shopifySubscriptionId String? 
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  cancellationDate      DateTime? // Date when the subscription should be cancelled at the end of billing period
+  variantsLimit         Int?      @default(0)
+  syncsQuantity         Int?      @default(0)
+  customApiUrl          String?   // Custom URL for webhooks
+  shopifySubscriptionId String?
+  subscriptionData      String?   // JSON string containing subscription details from Shopify
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 }
 
 model ProcessedWebhook {
@@ -79,4 +81,3 @@ model ProcessedWebhook {
   @@index([shop, topic])
   @@index([eventId])
 }
-

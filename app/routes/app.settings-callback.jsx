@@ -211,6 +211,8 @@ export async function loader({ request }) {
           status: "ACTIVE",
           variantsLimit: 999999,
           shopifySubscriptionId: chargeId,
+          startDate: subscription?.createdAt || new Date(), // Store start date for cancellation calculation
+          cancellationDate: null, // Clear any previous cancellation date
           // Store subscription details for further reference
           subscriptionData: JSON.stringify(subscription)
         },
@@ -241,5 +243,5 @@ export async function loader({ request }) {
 }
 
 export default function SettingsCallback() {
-  return <div>Finalizing your subscription. Please wait...</div>;
+  return <div>Finalising your subscription. Please wait...</div>;
 }

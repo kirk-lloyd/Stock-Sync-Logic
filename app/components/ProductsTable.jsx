@@ -12,6 +12,7 @@ import {
   Text,
   Pagination,
   Icon,
+  Banner
 } from "@shopify/polaris";
 import { SearchIcon, XCircleIcon } from "@shopify/polaris-icons";
 import SyncVariantModal from "./SyncVariantModal";
@@ -96,8 +97,12 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
     setAllVariants(variantsList);
   }, [products, isClient]);
 
-  // Function to open the sync modal for a given variant
+  // Function to open the sync modal for a given variant with subscription check
   function openSyncModal(variantId) {
+    if (locked) {
+      showToast("Please activate your subscription to perform this action.");
+      return;
+    }
     setSyncVariantId(variantId);
   }
 
@@ -302,6 +307,16 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
 
   return (
     <>
+      {locked && isClient && (
+        <Banner
+          status="critical"
+          title="No Active Subscription"
+          action={{ content: 'Activate Subscription', url: '/app/settings' }}
+        >
+          <p>Your subscription is not active. Please activate your subscription to use all features.</p>
+        </Banner>
+      )}
+      
       <Card padding="0">
         <Box paddingBlock="300" paddingInline="300" style={{ marginBottom: "10px" }}>
           <TextField
@@ -443,8 +458,9 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
                               e.stopPropagation();
                               openSyncModal(variant.id);
                             }}
+                            disabled={locked}
                           >
-                            Sync Variant
+                            {locked ? "Subscription Required" : "Sync Variant"}
                           </Button>
                         </div>
                       </IndexTable.Cell>
@@ -528,6 +544,7 @@ export function ProductsTable({ initialProducts, locked, showMasterVariantsOnly 
       {isClient && syncVariantId && (
         <SyncVariantModal
           variantId={syncVariantId}
+          locked={locked}
           onClose={() => setSyncVariantId(null)}
           onUpdate={(updatedVariant) => {
             setProducts((prev) =>
