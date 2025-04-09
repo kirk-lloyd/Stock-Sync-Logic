@@ -31,7 +31,7 @@ export const loader = async ({ request }) => {
     
     // Get shop subscription details
     let shopSub = await prisma.shopSubscription.findUnique({ where: { shop: shopDomain } });
-    let locked = !shopSub || shopSub.status !== "ACTIVE";
+    let locked = !shopSub || (shopSub.status !== "ACTIVE" && shopSub.status !== "PENDING_CANCELLATION");
     let plan = shopSub?.plan || "UNKNOWN";
     let variantsLimit = shopSub?.variantsLimit ?? 0;
     let status = shopSub?.status || "INACTIVE";
