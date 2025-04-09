@@ -2,6 +2,7 @@
 
 import { json } from "@remix-run/node";
 import prisma from "../db.server";
+import { Prisma } from "@prisma/client";
 
 /**
  * Utility for making calls to the Shopify GraphQL API.
@@ -76,6 +77,7 @@ async function cancelRecurringSubscription({ shop, accessToken, subscriptionId }
  */
 async function processPendingCancellations() {
   console.log("[API] Starting verification of pending subscription cancellations");
+  console.log("[API] Current time:", new Date().toISOString());
   
   const results = {
     processed: 0,
@@ -84,19 +86,44 @@ async function processPendingCancellations() {
   };
   
   try {
-    // Find all subscriptions marked for cancellation that have reached their deadline
-    const pendingCancellations = await prisma.shopSubscription.findMany({
-      where: {
-        status: "PENDING_CANCELLATION",
-        cancellationDate: {
-          lte: new Date(), // The cancellation date is now or in the past
-        },
-      },
-    });
+    // Use raw SQL query to avoid date comparison issues in Prisma
+    const pendingCancellations = await prisma.$queryRaw`
+      SELECT *
+      FROM "ShopSubscription"
+      WHERE status = 'PENDING_CANCELLATION'
+      AND "cancellationDate" <= ${Prisma.raw("CURRENT_TIMESTAMP")}
+    `;
     
     console.log(`[API] Found ${pendingCancellations.length} pending subscription cancellations`);
+    console.log("[API] Cancellation dates:", JSON.stringify(pendingCancellations.map(s => ({
+      shop: s.shop,
+      cancellationDate: s.cancellationDate,
+      currentTime: new Date().toISOString()
+    })), null, 2));
     
     if (pendingCancellations.length === 0) {
+      // Check if there are any pending cancellations with future dates
+      const allPending = await prisma.shopSubscription.findMany({
+        where: {
+          status: "PENDING_CANCELLATION",
+        },
+        select: {
+          shop: true,
+          cancellationDate: true,
+        }
+      });
+      
+      if (allPending.length > 0) {
+        console.log(`[API] Found ${allPending.length} pending cancellations with future dates:`, 
+          JSON.stringify(allPending.map(sub => ({
+            shop: sub.shop,
+            cancellationDate: sub.cancellationDate,
+            shouldCancel: sub.cancellationDate <= new Date(),
+            currentDate: new Date()
+          })), null, 2)
+        );
+      }
+      
       return results;
     }
     
@@ -105,6 +132,8 @@ async function processPendingCancellations() {
       const shopResult = {
         shop: subscription.shop,
         status: "pending",
+        cancellationDate: subscription.cancellationDate,
+        currentTime: new Date().toISOString(),
         messages: []
       };
       
@@ -142,6 +171,8 @@ async function processPendingCancellations() {
             console.error(`[API] Error canceling subscription in Shopify: ${shopifyError.message}`);
             // We continue anyway to update our database
           }
+        } else {
+          shopResult.messages.push("No Shopify subscription ID found");
         }
         
         // Update our database regardless of the Shopify result
@@ -185,6 +216,10 @@ export async function action({ request }) {
     return json({ error: "Method not allowed" }, { status: 405 });
   }
   
+  // Enable debug mode flag from request
+  const url = new URL(request.url);
+  const debug = url.searchParams.get("debug") === "true";
+  
   // Validate authentication via the API key
   const authHeader = request.headers.get("Authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -204,7 +239,12 @@ export async function action({ request }) {
       success: true, 
       message: `Processed ${results.processed} subscriptions, failed ${results.failed}`,
       timestamp: new Date().toISOString(),
-      details: results.details
+      details: results.details,
+      debug: debug ? {
+        currentTime: new Date().toISOString(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        environment: process.env.NODE_ENV
+      } : undefined
     });
   } catch (error) {
     console.error("[API] Error processing cancellations:", error);
@@ -229,22 +269,63 @@ export async function loader({ request }) {
     return json({ error: "Invalid API key" }, { status: 403 });
   }
   
+  // Enable debug mode from query parameters
+  const url = new URL(request.url);
+  const debug = url.searchParams.get("debug") === "true";
+  const forceCheck = url.searchParams.get("forceCheck") === "true"; // Add option to check all subscriptions
+  
   try {
-    // Only get the number of pending subscription cancellations
-    const pendingCount = await prisma.shopSubscription.count({
+    // Check database timezone settings
+    const dbTimezone = await prisma.$queryRaw`SHOW timezone`;
+    
+    // Use raw SQL query to get pending cancellations that are in the past
+    const rawQuery = `
+      SELECT shop, status, "cancellationDate", 
+             CURRENT_TIMESTAMP as current_time,
+             "cancellationDate" <= CURRENT_TIMESTAMP as should_cancel
+      FROM "ShopSubscription"
+      WHERE status = 'PENDING_CANCELLATION'
+    `;
+    
+    const allPendingWithDetails = await prisma.$queryRawUnsafe(rawQuery);
+    
+    // Filter for those that should be cancelled
+    const pendingCancellations = allPendingWithDetails.filter(sub => sub.should_cancel);
+    
+    // Get all pending cancellations (both past and future)
+    const allPending = await prisma.shopSubscription.findMany({
       where: {
         status: "PENDING_CANCELLATION",
-        cancellationDate: {
-          lte: new Date(),
-        },
       },
+      select: {
+        shop: true,
+        cancellationDate: true,
+        shopifySubscriptionId: true,
+        startDate: true
+      }
     });
     
     return json({ 
       success: true,
-      message: `Found ${pendingCount} pending subscription cancellations`,
-      pendingCount,
-      timestamp: new Date().toISOString()
+      message: `Found ${pendingCancellations.length} subscriptions that should be cancelled`,
+      pendingCount: pendingCancellations.length,
+      allPendingCount: allPending.length,
+      timestamp: new Date().toISOString(),
+      timezone: {
+        system: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        database: dbTimezone[0]?.timezone || 'unknown'
+      },
+      debug: debug ? {
+        currentTime: new Date().toISOString(),
+        allPendingWithStatus: allPendingWithDetails,
+        allPendingSubscriptions: allPending.map(s => ({
+          shop: s.shop,
+          cancellationDate: s.cancellationDate,
+          isPastDue: s.cancellationDate <= new Date(),
+          timeDiffInHours: Math.round((new Date() - s.cancellationDate) / (1000 * 60 * 60)),
+          timeDiffInDays: Math.round((new Date() - s.cancellationDate) / (1000 * 60 * 60 * 24)),
+        }))
+      } : undefined
     });
   } catch (error) {
     console.error("[API] Error verifying subscriptions:", error);

@@ -11,6 +11,7 @@ import {
 import React, { useState, useEffect } from "react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { Prisma } from "@prisma/client";
 import {
   Page,
   Layout,
@@ -251,22 +252,42 @@ function calculatePeriodEndDate(startDateString, interval) {
  */
 async function processPendingCancellations(shopDomain, accessToken) {
   try {
-    // Find subscriptions marked for cancellation
-    const pendingCancellations = await prisma.shopSubscription.findMany({
-      where: {
-        shop: shopDomain,
-        status: "PENDING_CANCELLATION",
-        cancellationDate: {
-          lte: new Date(), // End date is now or in the past
-        },
-      },
-    });
+    console.log("[processPendingCancellations] Starting check for shop:", shopDomain);
+    console.log("[processPendingCancellations] Current time:", new Date().toISOString());
     
-    if (!pendingCancellations.length) {
+    // Use raw SQL query to find pending cancellations to avoid date comparison issues
+    const pendingCancellations = await prisma.$queryRaw`
+      SELECT *
+      FROM "ShopSubscription"
+      WHERE shop = ${shopDomain}
+      AND status = 'PENDING_CANCELLATION'
+      AND "cancellationDate" <= ${Prisma.raw("CURRENT_TIMESTAMP")}
+    `;
+    
+    // Debug log for the query results
+    console.log(`[processPendingCancellations] Found ${pendingCancellations.length} subscriptions due for cancellation`);
+    
+    if (pendingCancellations.length === 0) {
+      // If no pending cancellations were found with the date criteria, let's check if there are any pending ones at all
+      const allPending = await prisma.shopSubscription.findMany({
+        where: {
+          shop: shopDomain,
+          status: "PENDING_CANCELLATION",
+        },
+      });
+      
+      if (allPending.length > 0) {
+        console.log(`[processPendingCancellations] Found ${allPending.length} pending cancellations with future dates:`, 
+          JSON.stringify(allPending.map(sub => ({
+            shop: sub.shop,
+            cancellationDate: sub.cancellationDate,
+            currentDate: new Date()
+          })), null, 2)
+        );
+      }
+      
       return null;
     }
-    
-    console.log(`[processPendingCancellations] Found ${pendingCancellations.length} subscriptions due for cancellation`);
     
     // Process each pending cancellation
     for (const subscription of pendingCancellations) {
@@ -421,7 +442,20 @@ export async function loader({ request }) {
     // Continue execution, as we can still show the page with local DB data
   }
   
-  return json({ shopSub, shopifySubscription, errorMessage });
+  // Enhance shopifySubscription with cancellation date from shopSub if needed
+  let enhancedShopifySubscription = shopifySubscription;
+  if (shopSub?.status === "PENDING_CANCELLATION" && shopSub?.cancellationDate) {
+    enhancedShopifySubscription = shopifySubscription ? {
+      ...shopifySubscription,
+      pendingCancellationDate: shopSub.cancellationDate.toISOString()
+    } : {
+      // Create a minimal subscription object if none exists
+      status: "PENDING_CANCELLATION",
+      pendingCancellationDate: shopSub.cancellationDate.toISOString()
+    };
+  }
+  
+  return json({ shopSub, shopifySubscription: enhancedShopifySubscription, errorMessage });
 }
 
 export async function action({ request }) {
@@ -507,7 +541,7 @@ export async function action({ request }) {
       // Calculate when the subscription period ends
       const endDate = calculatePeriodEndDate(subscription.createdAt, interval);
       
-      console.log("[app.settings action] Subscription scheduled for cancellation on:", endDate);
+      console.log("[app.settings action] Subscription scheduled for cancellation on:", endDate.toISOString());
       
       // Update the local DB record to mark the subscription as pending cancellation
       const updatedSubscription = await prisma.shopSubscription.update({
@@ -667,6 +701,26 @@ export default function AppSettings() {
     }
   }, [fetcher.state, fetcher.data]);
 
+  // Add this helper function to get cancellation date from either source
+  const getCancellationDate = () => {
+    // First try to get it from the Shopify subscription object
+    if (currentShopifySubscription?.pendingCancellationDate) {
+      return currentShopifySubscription.pendingCancellationDate;
+    } 
+    // Otherwise try to get it directly from the shop subscription in the database
+    else if (shopSub?.status === "PENDING_CANCELLATION" && shopSub?.cancellationDate) {
+      // Convert Date object to ISO string if it's not already
+      return typeof shopSub.cancellationDate === 'string' 
+        ? shopSub.cancellationDate 
+        : shopSub.cancellationDate.toISOString();
+    }
+    return null;
+  };
+
+  // Modify the hasPendingCancellation variable to check both sources
+  const hasPendingCancellation = shopSub?.status === "PENDING_CANCELLATION" || 
+                                currentShopifySubscription?.pendingCancellationDate !== undefined;
+
   // Helper function to get subscription status badge
   const getStatusBadge = (status, pendingCancellation = false) => {
     if (pendingCancellation) {
@@ -715,10 +769,6 @@ export default function AppSettings() {
       <p style={{ marginTop: '16px', color: '#637381' }}>Updating subscription status...</p>
     </div>
   );
-
-  // Determine if the subscription has pending cancellation
-  const hasPendingCancellation = shopSub?.status === "PENDING_CANCELLATION" || 
-                                currentShopifySubscription?.pendingCancellationDate !== undefined;
 
   // If shopSub is missing, render a simplified version of the page
   if (!shopSub) {
@@ -792,9 +842,9 @@ export default function AppSettings() {
                 )}
                 
                 {/* Show cancellation info if applicable */}
-                {hasPendingCancellation && currentShopifySubscription.pendingCancellationDate && (
+                {hasPendingCancellation && (
                   <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#FFF4E5', borderRadius: '4px' }}>
-                    <p><strong>Cancellation Scheduled:</strong> Your subscription will be cancelled on {formatDate(currentShopifySubscription.pendingCancellationDate)}</p>
+                    <p><strong>Cancellation Scheduled:</strong> Your subscription will be cancelled on {formatDate(getCancellationDate())}</p>
                     <p style={{ fontSize: '14px', marginTop: '4px' }}>You will continue to have full access until this date.</p>
                   </div>
                 )}
