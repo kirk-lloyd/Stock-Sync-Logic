@@ -568,6 +568,37 @@ export async function action({ request }) {
     }
   }
 
+  // Resume a subscription that was scheduled for cancellation
+  if (intent === "resume-subscription") {
+    try {
+      // Update the local DB record to remove the pending cancellation status
+      const updatedSubscription = await prisma.shopSubscription.update({
+        where: { shop: shopDomain },
+        data: {
+          status: "ACTIVE",
+          cancellationDate: null,
+        },
+      });
+      
+      console.log("[app.settings action] Resumed subscription:", updatedSubscription);
+      
+      // Get the latest Shopify subscription data for the response
+      const shopifySubscription = await queryActiveSubscription({
+        shop: shopDomain,
+        accessToken: session.accessToken,
+      });
+      
+      return json({ 
+        success: true, 
+        message: "Your subscription has been successfully resumed.", 
+        shopifySubscription
+      });
+    } catch (err) {
+      console.error("[app.settings action] Error resuming subscription:", err);
+      return json({ error: err.message }, { status: 500 });
+    }
+  }
+
   // Refresh subscription status
   if (intent === "refresh-subscription") {
     try {
@@ -890,6 +921,26 @@ export default function AppSettings() {
                 >
                   {hasPendingCancellation ? "Cancellation Scheduled" : "Cancel Subscription"}
                 </Button>
+                
+                {/* Add the resubscribe button that shows only when there's a pending cancellation */}
+                {hasPendingCancellation && (
+                  <div style={{ marginTop: '12px' }}>
+                    <Button
+                      primary
+                      onClick={() => {
+                        setIsLoading(true);
+                        fetcher.submit({ intent: "resume-subscription", host }, { method: "post" });
+                      }}
+                      disabled={isLoading}
+                    >
+                      Resume Subscription
+                    </Button>
+                    <p style={{ fontSize: '14px', marginTop: '8px', color: '#637381' }}>
+                      Changed your mind? Resume your subscription to maintain uninterrupted access.
+                    </p>
+                  </div>
+                )}
+                
                 {hasPendingCancellation && (
                   <p style={{ fontSize: '14px', marginTop: '8px', color: '#637381' }}>
                     Your subscription will remain active until the end of the current billing period.

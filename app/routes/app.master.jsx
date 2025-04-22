@@ -206,6 +206,7 @@ export default function MasterProductsView() {
   const [syncLoading, setSyncLoading] = useState(false);
   const [isTableReady, setIsTableReady] = useState(false);
   const [isClient, setIsClient] = useState(false);
+  const [showGettingStartedCard, setShowGettingStartedCard] = useState(true);
 
   // Safely handle client-side rendering
   useEffect(() => {
@@ -337,8 +338,33 @@ export default function MasterProductsView() {
           </Banner>
         )}
         
+        
+        <Card sectioned style={{ padding: '20px', marginBottom: '20px' }}>
+          <Text variant="headingMd">Can't see the master products?</Text>
+          <Text>
+            To view your newly assigned master products, please click the "Update Products" button above. 
+            This will refresh the data and ensure all recent changes are displayed in the table below. 
+            Alternatively, the data will update automatically after 10 minutes.
+          </Text>
+        </Card>
+
+        {/* New Card that appears when no products are found */}
+        {products.length === 0 && !bulkInProgress && (
+          <Card sectioned style={{ padding: '20px', marginBottom: '20px' }}>
+            <Text variant="headingMd">No Master Products Found</Text>
+            <Text>
+              We couldn't find any products with master variants. If you've recently assigned master variants to your products,
+              try clicking the "Update Products" button above to refresh the data. If you haven't assigned any master variants yet,
+              please go to the Products page to assign them.
+            </Text>
+            <Button url="/app/products/">
+              Manage all products 📦
+            </Button>
+          </Card>
+        )}
+
         {/* Control rendering to prevent layout jumps */}
-        <div style={{ position: 'relative' }}>
+        <div style={{ position: 'relative', marginTop: '20px' }}>
           {!isTableReady && <TablePreloader />}
           
           <div style={{ visibility: isTableReady ? 'visible' : 'hidden' }}>
