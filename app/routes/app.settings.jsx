@@ -23,8 +23,17 @@ import {
   TextContainer,
   Badge,
   Spinner,
+  Link,
+  Text,
+  BlockStack,
+  InlineStack,
+  Divider,
+  Box,
+  List,
+  Icon,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
+import { CheckIcon } from '@shopify/polaris-icons';
 
 /**
  * Utility function for making API calls to Shopify's GraphQL API.
@@ -154,21 +163,21 @@ async function cancelRecurringSubscription({ shop, accessToken, subscriptionId }
 /**
  * Create a recurring subscription using Shopify's GraphQL API.
  *
- * @param {Object} params - Contains shop, accessToken, and returnUrl.
+ * @param {Object} params - Contains shop, accessToken, returnUrl.
  * @returns {string} confirmationUrl for the subscription.
  */
 async function createRecurringSubscription({ shop, accessToken, returnUrl }) {
   const query = `
     mutation CreateSynclogicSubscription($returnUrl: URL!, $test: Boolean) {
       appSubscriptionCreate(
-        name: "Stock Control Master Paid Plan"
+        name: "Plus"
         returnUrl: $returnUrl
         test: $test
-        trialDays: 7
+        trialDays: 14
         lineItems: [{
           plan: {
             appRecurringPricingDetails: {
-              price: { amount: 49.99, currencyCode: USD }
+              price: { amount: 49.99, currencyCode: AUD }
               interval: EVERY_30_DAYS
             }
           }
@@ -191,7 +200,7 @@ async function createRecurringSubscription({ shop, accessToken, returnUrl }) {
   const isDevEnvironment = process.env.NODE_ENV === 'development';
   const variables = { 
     returnUrl,
-    test: true // Use test mode in development
+    test: isDevEnvironment
   };
 
   try {
@@ -431,7 +440,7 @@ export async function loader({ request }) {
         shopSub = await prisma.shopSubscription.findUnique({
           where: { shop: shopDomain },
         });
-        console.log("[app.settings loader] Updated local subscription record to PAID plan");
+        console.log("[app.settings loader] Updated local subscription record to Plus plan");
       } catch (updateErr) {
         console.error("[app.settings loader] Error updating subscription record:", updateErr);
         // Continue with existing shopSub even if update fails
@@ -660,6 +669,96 @@ export async function action({ request }) {
   return json({ error: "Unknown action" }, { status: 400 });
 }
 
+// Helper component for feature lists
+const FeatureItem = ({ children }) => (
+  <Box paddingBlockEnd="2">
+    <InlineStack gap="2" align="start">
+      <Box paddingInlineEnd="1">
+        <Icon source={CheckIcon} color="success" />
+      </Box>
+      <Text variant="bodyMd" as="span">{children}</Text>
+    </InlineStack>
+  </Box>
+);
+
+// Plan card component
+const PlanCard = ({ 
+  title, 
+  isCurrentPlan, 
+  price, 
+  currencyCode = "AUD", 
+  interval = "month", 
+  features, 
+  trialDays, 
+  action,
+  isHighlighted = false,
+  additionalInfo
+}) => {
+  // Format price for display
+  const formattedPrice = parseFloat(price).toFixed(2);
+  
+  return (
+    <Card>
+      <div style={{
+        borderWidth: isHighlighted ? '2px' : '1px',
+        borderStyle: 'solid',
+        borderColor: isHighlighted ? '#5c6ac4' : '#dfe3e8',
+        borderRadius: '8px',
+        padding: '24px',
+        backgroundColor: isCurrentPlan ? '#f9fafb' : 'white',
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column'
+      }}>
+        {/* Plan header */}
+        <div style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text variant="headingMd" as="h2">{title}</Text>
+          {isCurrentPlan && <Badge status="success">Current Plan</Badge>}
+        </div>
+        
+        <Divider />
+        
+        {/* Pricing information */}
+        <div style={{ margin: '20px 0' }}>
+          <Text variant="heading2xl" as="p" fontWeight="bold">
+            ${formattedPrice}
+            <Text variant="bodySm" as="span" fontWeight="regular" color="subdued"> {currencyCode}/{interval}</Text>
+          </Text>
+          
+          {trialDays > 0 && (
+            <Box paddingBlockStart="2" paddingBlockEnd="3">
+              <Box background="surface-success-subdued" borderRadius="2" padding="2">
+                <Text variant="bodyMd" as="p">
+                  Includes a {trialDays}-day free trial
+                </Text>
+              </Box>
+            </Box>
+          )}
+        </div>
+        
+        {/* Features list */}
+        <BlockStack gap="3">
+          {features.map((feature, index) => (
+            <FeatureItem key={index}>{feature}</FeatureItem>
+          ))}
+        </BlockStack>
+        
+        {/* Additional information */}
+        {additionalInfo && (
+          <Box paddingBlockStart="4">
+            <Text variant="bodySm" as="p" color="subdued">{additionalInfo}</Text>
+          </Box>
+        )}
+        
+        {/* Action button */}
+        <div style={{ marginTop: 'auto', paddingTop: '20px' }}>
+          {action}
+        </div>
+      </div>
+    </Card>
+  );
+};
+
 export default function AppSettings() {
   const { shopSub, shopifySubscription, errorMessage } = useLoaderData();
   const actionData = useActionData();
@@ -833,14 +932,14 @@ export default function AppSettings() {
       <Layout>
         {/* Card to display the Shopify subscription status */}
         <Layout.Section>
-          <Card title="Shopify Subscription Status" sectioned>
+          <Card title="Current Subscription Status" sectioned>
             {isLoading ? (
               renderLoadingState()
             ) : currentShopifySubscription ? (
               <div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                   <div>
-                    <p style={{ fontSize: '16px', fontWeight: '600' }}>{currentShopifySubscription.name || "N/A"}</p>
+                    <p style={{ fontSize: '16px', fontWeight: '600' }}>{currentShopifySubscription.name || "Plus"}</p>
                     {getStatusBadge(currentShopifySubscription.status, hasPendingCancellation)}
                   </div>
                   <Button onClick={handleRefresh}>Refresh Status</Button>
@@ -857,7 +956,7 @@ export default function AppSettings() {
                         <strong>Price:</strong> {
                           currentShopifySubscription.lineItems[0].plan.pricingDetails.price?.amount || "N/A"
                         } {
-                          currentShopifySubscription.lineItems[0].plan.pricingDetails.price?.currencyCode || ""
+                          currentShopifySubscription.lineItems[0].plan.pricingDetails.price?.currencyCode || "AUD"
                         }
                       </p>
                     )}
@@ -889,94 +988,132 @@ export default function AppSettings() {
           </Card>
         </Layout.Section>
         
-        <Layout.Section oneHalf>
-          <Card sectioned title="Free Plan">
-            <p>
-              Limited to 100 variants, includes a 7-day trial. {shopSub.plan === "FREE" && 
-                <Badge status="success">Current Plan</Badge>
-              }
-            </p>
-            <p style={{ fontWeight: 500 }}>Price: $0/month</p>
-          </Card>
-        </Layout.Section>
-        <Layout.Section oneHalf>
-          <Card sectioned title="Paid Plan">
-            <p>
-              Unlimited variants, includes a 7-day trial. {isPaidPlan && 
-                <Badge status="success">Current Plan</Badge>
-              }
-            </p>
-            <p style={{ fontWeight: 500 }}>Price: $49.99/month</p>
-            {!isPaidPlan ? (
-              <Form method="post" action={`?host=${host}`}>
-                <input type="hidden" name="intent" value="start-paid-plan" />
-                <Button submit primary disabled={isLoading}>Start Paid Plan</Button>
-              </Form>
-            ) : (
-              <>
-                <Button 
-                  destructive 
-                  onClick={() => setShowCancelModal(true)} 
-                  disabled={isLoading || hasPendingCancellation}
-                >
-                  {hasPendingCancellation ? "Cancellation Scheduled" : "Cancel Subscription"}
-                </Button>
-                
-                {/* Add the resubscribe button that shows only when there's a pending cancellation */}
-                {hasPendingCancellation && (
-                  <div style={{ marginTop: '12px' }}>
-                    <Button
-                      primary
-                      onClick={() => {
-                        setIsLoading(true);
-                        fetcher.submit({ intent: "resume-subscription", host }, { method: "post" });
-                      }}
-                      disabled={isLoading}
-                    >
-                      Resume Subscription
-                    </Button>
-                    <p style={{ fontSize: '14px', marginTop: '8px', color: '#637381' }}>
-                      Changed your mind? Resume your subscription to maintain uninterrupted access.
-                    </p>
-                  </div>
-                )}
-                
-                {hasPendingCancellation && (
-                  <p style={{ fontSize: '14px', marginTop: '8px', color: '#637381' }}>
-                    Your subscription will remain active until the end of the current billing period.
-                  </p>
-                )}
-                <Modal
-                  open={showCancelModal}
-                  title="Cancel Subscription"
-                  primaryAction={{
-                    content: "Confirm Cancellation",
-                    destructive: true,
-                    onAction: () => {
-                      setIsLoading(true);
-                      fetcher.submit({ intent: "cancel-subscription", host }, { method: "post" });
-                      setShowCancelModal(false);
-                    },
-                  }}
-                  secondaryActions={[
-                    {
-                      content: "No, Keep Subscription",
-                      onAction: () => setShowCancelModal(false),
-                    },
-                  ]}
-                  onClose={() => setShowCancelModal(false)}
-                >
-                  <Modal.Section>
-                    <TextContainer>
-                      <p>Are you sure you want to cancel your subscription?</p>
-                      <p>Your subscription will remain active until the end of the current billing period, then automatically revert to the FREE plan.</p>
-                    </TextContainer>
-                  </Modal.Section>
-                </Modal>
-              </>
+        {/* Subscription Plans Section */}
+        <Layout.Section>
+          <Card title="Choose Your Plan" sectioned>
+            <Text variant="bodyMd" as="p" color="subdued" fontWeight="medium">
+              Select the plan that best suits your business needs. All plans are billed through Shopify Billing.
+            </Text>
+            
+            {hasPendingCancellation && (
+              <Box paddingBlockStart="4" paddingBlockEnd="4">
+                <Banner status="warning" title="Cancellation Scheduled">
+                  <p>Your subscription will be cancelled on {formatDate(getCancellationDate())}. You will continue to have access to all features until that date.</p>
+                </Banner>
+              </Box>
             )}
+            
+            <BlockStack gap="5" padding="5">
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                {/* Free Plan */}
+                <PlanCard
+                  title="Free Plan"
+                  isCurrentPlan={shopSub.plan === "FREE"}
+                  price="0.00"
+                  currencyCode="AUD"
+                  interval="month"
+                  trialDays={0}
+                  features={[
+                    "Limited to 100 variants",
+                    "Basic stock control features",
+                    "Community support",
+                    "Manual inventory updates"
+                  ]}
+                  action={
+                    isPaidPlan && !hasPendingCancellation ? (
+                      <Button 
+                        fullWidth
+                        onClick={() => setShowCancelModal(true)} 
+                        disabled={isLoading}
+                      >
+                        Downgrade to Free
+                      </Button>
+                    ) : (
+                      <Button fullWidth disabled>Current Plan</Button>
+                    )
+                  }
+                  additionalInfo="Free forever, no credit card required"
+                />
+                
+                {/* Plus Plan */}
+                <PlanCard
+                  title="Plus Plan"
+                  isCurrentPlan={isPaidPlan}
+                  price="49.99"
+                  currencyCode="AUD"
+                  interval="month"
+                  trialDays={14}
+                  isHighlighted={true}
+                  features={[
+                    "Unlimited variants",
+                    "Advanced stock control features",
+                    "Priority email support",
+                    "Automated inventory updates",
+                    "Custom webhook integration",
+                    "Bulk operations support"
+                  ]}
+                  action={
+                    !isPaidPlan ? (
+                      <Form method="post" action={`?host=${host}`}>
+                        <input type="hidden" name="intent" value="start-paid-plan" />
+                        <Button submit primary fullWidth disabled={isLoading}>
+                          Start 14-Day Free Trial
+                        </Button>
+                        <p style={{ fontSize: '13px', color: '#637381', marginTop: '8px', textAlign: 'center' }}>
+                          No charge for 14 days. Cancel anytime.
+                        </p>
+                      </Form>
+                    ) : hasPendingCancellation ? (
+                      <Button
+                        primary
+                        fullWidth
+                        onClick={() => {
+                          setIsLoading(true);
+                          fetcher.submit({ intent: "resume-subscription", host }, { method: "post" });
+                        }}
+                        disabled={isLoading}
+                      >
+                        Resume Subscription
+                      </Button>
+                    ) : (
+                      <Button 
+                        destructive 
+                        fullWidth
+                        onClick={() => setShowCancelModal(true)} 
+                        disabled={isLoading}
+                      >
+                        Cancel Subscription
+                      </Button>
+                    )
+                  }
+                  additionalInfo={
+                    !isPaidPlan
+                      ? "14-day free trial, cancel anytime. No charges during trial period."
+                      : hasPendingCancellation
+                        ? "Your subscription will remain active until the end of the current billing period."
+                        : "You are currently on the Plus plan with unlimited variants."
+                  }
+                />
+              </div>
+            </BlockStack>
+            
+            <Box paddingBlockStart="4">
+              <Text variant="bodyMd" as="p" alignment="center">
+                Have questions about our plans? <Link url="mailto:support@stockcontrolmaster.com">Contact our support team</Link>
+              </Text>
+            </Box>
+            
+            <Box paddingBlockStart="4" background="surface-subdued" borderRadius="2" padding="4" marginBlockStart="4">
+              <BlockStack gap="2">
+                <Text variant="headingSm" as="h3">Billing Terms</Text>
+                <Text variant="bodyMd" as="p">All prices in AUD. Free trial automatically converts to a paid subscription unless cancelled before the trial period ends.</Text>
+                <Text variant="bodyMd" as="p">Subscriptions are billed every 30 days through Shopify Billing.</Text>
+                <Text variant="bodyMd" as="p">You can cancel your subscription at any time. Cancellations take effect at the end of your current billing period.</Text>
+              </BlockStack>
+            </Box>
           </Card>
         </Layout.Section>
+        
         <Layout.Section>
           <Card sectioned title="Custom API URL">
             <Form method="post">
@@ -994,6 +1131,36 @@ export default function AppSettings() {
           </Card>
         </Layout.Section>
       </Layout>
+      
+      {/* Cancellation Confirmation Modal */}
+      <Modal
+        open={showCancelModal}
+        title="Cancel Subscription"
+        primaryAction={{
+          content: "Confirm Cancellation",
+          destructive: true,
+          onAction: () => {
+            setIsLoading(true);
+            fetcher.submit({ intent: "cancel-subscription", host }, { method: "post" });
+            setShowCancelModal(false);
+          },
+        }}
+        secondaryActions={[
+          {
+            content: "Keep My Subscription",
+            onAction: () => setShowCancelModal(false),
+          },
+        ]}
+        onClose={() => setShowCancelModal(false)}
+      >
+        <Modal.Section>
+          <TextContainer>
+            <p>Are you sure you want to cancel your subscription?</p>
+            <p>Your subscription will remain active until the end of the current billing period ({formatDate(getCancellationDate()) || "your next billing date"}), then automatically revert to the FREE plan with a 100 variant limit.</p>
+            <p>You can resume your subscription at any time before the cancellation date.</p>
+          </TextContainer>
+        </Modal.Section>
+      </Modal>
     </Page>
   );
 }
