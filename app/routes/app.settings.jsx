@@ -177,7 +177,7 @@ async function createRecurringSubscription({ shop, accessToken, returnUrl }) {
         lineItems: [{
           plan: {
             appRecurringPricingDetails: {
-              price: { amount: 49.99, currencyCode: AUD }
+              price: { amount: 49.99, currencyCode: USD }
               interval: EVERY_30_DAYS
             }
           }
@@ -686,7 +686,7 @@ const PlanCard = ({
   title, 
   isCurrentPlan, 
   price, 
-  currencyCode = "AUD", 
+  currencyCode = "USD", 
   interval = "month", 
   features, 
   trialDays, 
@@ -766,16 +766,21 @@ export default function AppSettings() {
   const urlParams = new URLSearchParams(location.search);
   const host = urlParams.get("host") || "";
   
-  // Use optional chaining to prevent errors if shopSub is undefined
-  const [customUrl, setCustomUrl] = useState(shopSub?.customApiUrl || "");
-  
-  // Convert isPaidPlan to state variable instead of constant
-  const [isPaidPlan, setIsPaidPlan] = useState(shopSub?.plan === "PAID");
-  
+  // Para evitar problemas de hidratación, usamos valores seguros iniciales
+  const [customUrl, setCustomUrl] = useState("");
+  const [isPaidPlan, setIsPaidPlan] = useState(false);
   const [showCancelModal, setShowCancelModal] = useState(false);
-  const [currentShopifySubscription, setCurrentShopifySubscription] = useState(shopifySubscription);
+  const [currentShopifySubscription, setCurrentShopifySubscription] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const fetcher = useFetcher();
+
+  // Inicializar estados después del renderizado del cliente
+  useEffect(() => {
+    // Inicializar valores solo en el lado del cliente para evitar desajustes de hidratación
+    setCustomUrl(shopSub?.customApiUrl || "");
+    setIsPaidPlan(shopSub?.plan === "PAID");
+    setCurrentShopifySubscription(shopifySubscription);
+  }, [shopSub, shopifySubscription]);
 
   useEffect(() => {
     if (actionData?.confirmationUrl) {
@@ -800,7 +805,7 @@ export default function AppSettings() {
         }
         
         setIsLoading(false);
-      }, 3000); // 3 second delay
+      }, 1000); // Reducida a 1 segundo para mejor experiencia
       
       return () => clearTimeout(timer);
     }
@@ -811,7 +816,7 @@ export default function AppSettings() {
     if (fetcher.state === "submitting") {
       setIsLoading(true);
     } else if (fetcher.data && fetcher.state === "idle") {
-      // After fetcher completes and data is received, wait 3 seconds before updating the UI
+      // After fetcher completes and data is received
       const timer = setTimeout(() => {
         // Handle both cases: when subscription data exists and when it's explicitly null
         if (fetcher.data.shopifySubscription !== undefined) {
@@ -825,7 +830,7 @@ export default function AppSettings() {
         }
         
         setIsLoading(false);
-      }, 3000);
+      }, 1000);
       
       return () => clearTimeout(timer);
     }
@@ -848,8 +853,8 @@ export default function AppSettings() {
   };
 
   // Modify the hasPendingCancellation variable to check both sources
-  const hasPendingCancellation = shopSub?.status === "PENDING_CANCELLATION" || 
-                                currentShopifySubscription?.pendingCancellationDate !== undefined;
+  const hasPendingCancellation = (shopSub?.status === "PENDING_CANCELLATION" || 
+                                currentShopifySubscription?.pendingCancellationDate !== undefined) || false;
 
   // Helper function to get subscription status badge
   const getStatusBadge = (status, pendingCancellation = false) => {
@@ -956,7 +961,7 @@ export default function AppSettings() {
                         <strong>Price:</strong> {
                           currentShopifySubscription.lineItems[0].plan.pricingDetails.price?.amount || "N/A"
                         } {
-                          currentShopifySubscription.lineItems[0].plan.pricingDetails.price?.currencyCode || "AUD"
+                          currentShopifySubscription.lineItems[0].plan.pricingDetails.price?.currencyCode || "USD"
                         }
                       </p>
                     )}
@@ -1005,19 +1010,19 @@ export default function AppSettings() {
             
             <BlockStack gap="5" padding="5">
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
-                {/* Free Plan */}
+                {/* Free Plan - Listed first according to Shopify requirements */}
                 <PlanCard
                   title="Free Plan"
                   isCurrentPlan={shopSub.plan === "FREE"}
                   price="0.00"
-                  currencyCode="AUD"
+                  currencyCode="USD"
                   interval="month"
                   trialDays={0}
                   features={[
                     "Limited to 100 variants",
-                    "Basic stock control features",
-                    "Community support",
-                    "Manual inventory updates"
+                    /*"Basic stock control features",*/
+                    /*"Community support",*/
+                    "Automated inventory updates"
                   ]}
                   action={
                     isPaidPlan && !hasPendingCancellation ? (
@@ -1032,7 +1037,7 @@ export default function AppSettings() {
                       <Button fullWidth disabled>Current Plan</Button>
                     )
                   }
-                  additionalInfo="Free forever, no credit card required"
+                  /*additionalInfo="Free forever, no credit card required"*/
                 />
                 
                 {/* Plus Plan */}
@@ -1040,17 +1045,17 @@ export default function AppSettings() {
                   title="Plus Plan"
                   isCurrentPlan={isPaidPlan}
                   price="49.99"
-                  currencyCode="AUD"
+                  currencyCode="USD"
                   interval="month"
                   trialDays={14}
                   isHighlighted={true}
                   features={[
                     "Unlimited variants",
                     "Advanced stock control features",
-                    "Priority email support",
+                    /*"Priority email support",*/
                     "Automated inventory updates",
-                    "Custom webhook integration",
-                    "Bulk operations support"
+                    /*"Custom webhook integration",*/
+                    /*"Bulk operations support"*/
                   ]}
                   action={
                     !isPaidPlan ? (
@@ -1091,7 +1096,7 @@ export default function AppSettings() {
                       ? "14-day free trial, cancel anytime. No charges during trial period."
                       : hasPendingCancellation
                         ? "Your subscription will remain active until the end of the current billing period."
-                        : "You are currently on the Plus plan with unlimited variants."
+                        : "You are currently on the PLUS PLAN with unlimited variants."
                   }
                 />
               </div>
@@ -1103,10 +1108,11 @@ export default function AppSettings() {
               </Text>
             </Box>
             
-            <Box paddingBlockStart="4" background="surface-subdued" borderRadius="2" padding="4" marginBlockStart="4">
+            {/* Corregido - se quitó marginBlockStart que causaba error */}
+            <Box paddingBlockStart="4" background="surface-subdued" borderRadius="2" padding="4">
               <BlockStack gap="2">
                 <Text variant="headingSm" as="h3">Billing Terms</Text>
-                <Text variant="bodyMd" as="p">All prices in AUD. Free trial automatically converts to a paid subscription unless cancelled before the trial period ends.</Text>
+                <Text variant="bodyMd" as="p">All prices in USD. Free trial automatically converts to a paid subscription unless cancelled before the trial period ends.</Text>
                 <Text variant="bodyMd" as="p">Subscriptions are billed every 30 days through Shopify Billing.</Text>
                 <Text variant="bodyMd" as="p">You can cancel your subscription at any time. Cancellations take effect at the end of your current billing period.</Text>
               </BlockStack>
